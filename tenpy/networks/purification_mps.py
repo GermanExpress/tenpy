@@ -148,7 +148,7 @@ class PurificationMPS(MPS):
         for B in self._B:
             if not set(['vL', 'vR', 'p', 'q']) <= set(B.get_leg_labels()):
                 raise ValueError("B has wrong labels " + repr(B.get_leg_labels()))
-        super(PurificationMPS, self).test_sanity()
+        super().test_sanity()
 
     def copy(self):
         """Returns a copy of `self`.
@@ -165,6 +165,13 @@ class PurificationMPS(MPS):
 
         Parameters
         ----------
+        sites : list of :class:`~tenpy.networks.site.Site`
+            The sites defining the local Hilbert space.
+        bc : {'finite', 'segment', 'infinite'}
+            MPS boundary conditions as described in :class:`~tenpy.networks.mps.MPS`.
+        form : (list of) {``'B' | 'A' | 'C' | 'G' | None`` | tuple(float, float)}
+            The canonical form of the stored 'matrices', see table in :mod:`~tenpy.networks.mps`.
+            A single choice holds for all of the entries.
 
         Returns
         -------

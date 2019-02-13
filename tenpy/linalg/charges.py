@@ -9,7 +9,7 @@ Contains implementation of classes
     The contents of this module are imported in :mod:`~tenpy.linalg.np_conserved`,
     so you usually don't need to import this module in your application.
 
-A detailed introduction to `np_conserved` can be found in :doc:`../intro_npc`.
+A detailed introduction to `np_conserved` can be found in :doc:`/intro_npc`.
 """
 # Copyright 2018 TeNPy Developers
 
@@ -22,7 +22,7 @@ from ..tools.misc import lexsort, inverse_permutation
 from ..tools.string import vert_join
 from ..tools.optimization import optimize, OptimizationFlag
 
-__all__ = ['ChargeInfo', 'LegCharge', 'LegPipe']
+__all__ = ['ChargeInfo', 'LegCharge', 'LegPipe', 'QTYPE']
 
 QTYPE = np.int_  # numpy dtype for the charges
 """Numpy data type for the charges."""
@@ -234,7 +234,7 @@ class LegCharge(object):
     r"""Save the charge data associated to a leg of a tensor.
 
     This class is more or less a wrapper around a 2D numpy array `charges` and a 1D array `slices`.
-    See :doc:`../intro_npc` for more details.
+    See :doc:`/intro_npc` for more details.
 
     (This class is implemented in :mod:`tenpy.linalg.charges` but also imported in
     :mod:`tenpy.linalg.np_conserved` for convenience.)
@@ -371,7 +371,7 @@ class LegCharge(object):
 
     @classmethod
     def from_add_charge(cls, legs, chargeinfo=None):
-        """Add the (independent) charges of two legs to get larger `qnumber`.
+        """Add the (independent) charges of two or more legs to get larger `qnumber`.
 
         Parameters
         ----------
@@ -553,7 +553,7 @@ class LegCharge(object):
 
                 self.charges * self.qconj = - other.charges * other.qconj
 
-        In general, there could also be a change of the total charge, see :doc:`../intro_npc`
+        In general, there could also be a change of the total charge, see :doc:`/intro_npc`
         This special case is not considered here - instead use
         :meth:`~tenpy.linalg.np_conserved.gauge_total_charge`,
         if a change of the charge is desired.
@@ -739,37 +739,35 @@ class LegCharge(object):
         cp.bunched = self.is_blocked()  # no, it's not `is_bunched`
         return map_qind, block_masks, cp
 
-    def extend(self, new_ind_len, charges=None):
-        """Return a new :class:`LegCharge`, which extends self with a new charge block.
+    def extend(self, extra):
+        """Return a new :class:`LegCharge`, which extends self with futher charges.
 
         This is needed to formally increase the dimension of an Array.
 
         Parameters
         ----------
-        new_ind_len : int
-            The `ind_len` for the new :class:`LegCharge`.
-        charges : array | None
-            The charge values to be used for the new charge block.
-            `None` defaults to trivial charges (i.e. 0 values).
+        extra : :class:`LegCharge` | int
+            By what to extend, i.e. the charges to be appended to `self`.
+            An int stands for extending the length of the array by a single new block of that size
+            and zero charges.
 
         Returns
         -------
         extended_leg : :class:`LegCharge`
-            Copy of `self` extended by one additional charge block with the specified `charges`
-            increasing the `ind_len` to `new_ind_len`.
-            If `new_ind_len` is not larger than the current `ind_len`, just return `self`.
+            Copy of `self` extended by the charge blocks of the `extra` leg.
         """
-        if new_ind_len < self.ind_len:
-            raise ValueError("Can't reduce the ind_len with extend!")
-        if new_ind_len == self.ind_len:
-            return self
-        new_slices = np.zeros(self.block_number + 2, np.intp)
-        new_slices[:-1] = self.slices
-        new_slices[-1] = new_ind_len
-        new_charges = np.zeros((self.block_number + 1, self.chinfo.qnumber), dtype=QTYPE)
-        new_charges[:-1] = self.charges
-        if charges is not None:
-            new_charges[-1, :] = self.chinfo.make_valid(charges)
+        if not isinstance(extra, LegCharge):
+            extra = LegCharge.from_trivial(extra, self.chinfo, self.qconj)
+        bn = self.block_number
+        new_slices = np.zeros(bn + extra.block_number + 1, np.intp)
+        new_slices[:bn + 1] = self.slices
+        new_slices[bn:] = extra.slices + self.ind_len
+        new_charges = np.zeros((bn + extra.block_number, self.chinfo.qnumber), dtype=QTYPE)
+        new_charges[:bn] = self.charges
+        if self.qconj == extra.qconj:
+            new_charges[bn:] = extra.charges
+        else:
+            new_charges[bn:] = - extra.charges
         return LegCharge(self.chinfo, new_slices, new_charges, qconj=self.qconj)
 
     def charge_sectors(self):
@@ -947,7 +945,7 @@ class LegPipe(LegCharge):
     def __init__(self, legs, qconj=1, sort=True, bunch=True):
         chinfo = legs[0].chinfo
         # initialize LegCharge with trivial charges/slices; gets overwritten in _init_from_legs
-        super(LegPipe, self).__init__(chinfo, [0, 1], [[0] * chinfo.qnumber], qconj)
+        LegCharge.__init__(self, chinfo, [0, 1], [[0] * chinfo.qnumber], qconj)
         # additional attributes
         self.legs = legs = tuple(legs)
         self.subshape = tuple([l.ind_len for l in self.legs])
@@ -967,7 +965,7 @@ class LegPipe(LegCharge):
         """Sanity check. Raises ValueErrors, if something is wrong."""
         if optimize(OptimizationFlag.skip_arg_checks):
             return
-        super(LegPipe, self).test_sanity()
+        LegCharge.test_sanity(self)
         if not hasattr(self, "subshape"):
             return  # omit further check during ``super(LegPipe, self).__init__``
         assert (all([l.chinfo == self.chinfo for l in self.legs]))
@@ -983,7 +981,7 @@ class LegPipe(LegCharge):
         """Return a shallow copy with opposite ``self.qconj``.
 
         Also conjugates each of the incoming legs."""
-        res = super(LegPipe, self).conj()  # invert self.qconj
+        res = LegCharge.conj(self)  # invert self.qconj
         res.legs = tuple([l.conj() for l in self.legs])
         return res
 
@@ -1142,7 +1140,7 @@ class LegPipe(LegCharge):
 
         if bunch:
             # call LegCharge.bunch(), which also calculates new blocksizes
-            idx, bunched = super(LegPipe, self).bunch()
+            idx, bunched = LegCharge.bunch(self)
             self.charges = bunched.charges  # copy information back to self
             self.slices = bunched.slices
             # calculate q_map[:, 2], the qindices corresponding to the rows of q_map
@@ -1187,7 +1185,7 @@ class LegPipe(LegCharge):
 
     def __getstate__(self):
         """Allow to pickle and copy."""
-        super_state = super(LegPipe, self).__getstate__()
+        super_state = LegCharge.__getstate__(self)
         return (super_state, self.nlegs, self.legs, self.subshape, self.subqshape, self.q_map,
                 self.q_map_slices, self._perm, self._strides)
 
@@ -1201,7 +1199,7 @@ class LegPipe(LegCharge):
         self.q_map_slices = q_map_slices
         self._perm = _perm
         self._strides = _strides
-        super(LegPipe, self).__setstate__(super_state)
+        LegCharge.__setstate__(self, super_state)
 
 
 def _find_row_differences(qflat):

@@ -116,6 +116,12 @@ pygments_style = 'sphinx'
 # If true, keep warnings as "system message" paragraphs in the built documents.
 #keep_warnings = False
 
+# default options for autodoc
+autodoc_default_options = {
+    'member-order': 'bysource',
+    #  'special-members': '__init__',
+}
+
 # Avoid a bunch of warnings when using properties with doc strings in classes.
 # see https://github.com/phn/pytpm/issues/3#issuecomment-12133978
 numpydoc_show_class_members = True
@@ -175,7 +181,7 @@ html_static_path = []  # ['sphinx_static']   # not needed
 
 # If not '', a 'Last updated on:' timestamp is inserted at every page bottom,
 # using the given strftime format.
-#html_last_updated_fmt = '%b %d, %Y'
+html_last_updated_fmt = '%b %d, %Y'
 
 # If true, SmartyPants will be used to convert quotes and dashes to
 # typographically correct entities.
@@ -292,4 +298,8 @@ texinfo_documents = [
 #texinfo_no_detailmenu = False
 
 # Example configuration for intersphinx: refer to the Python standard library.
-intersphinx_mapping = {'https://docs.python.org/3': None}
+intersphinx_mapping = {'python': ('https://docs.python.org/3', None),
+                       'numpy': ('https://docs.scipy.org/doc/numpy', None),
+                       'scipy': ('https://docs.scipy.org/doc/scipy/reference/', None),
+                       'matplotlib': ('https://matplotlib.org', None),
+                       }

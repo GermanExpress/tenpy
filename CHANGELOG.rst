@@ -13,10 +13,26 @@ Backwards incompatible changes
   This is no longer valid and needs to be replaced by ``("standard", snake_winding, priority)``.
 - Moved the boundary conditions `bc_coupling` from the :class:`tenpy.models.model.CouplingModel` into the :class:`tenpy.models.lattice.Lattice` (as `bc`).
   Using the parameter `bc_coupling` will raise a FutureWarning, one should set the boundary conditions directly in the lattice.
+- Added parameter `permute` (True by default) in :meth:`tenpy.networks.mps.from_product_state` and :meth:`tenpy.networks.mps.from_Bflat`.
+  The resulting state will therefore be independent of the "conserve" parameter of the Sites - unlike before, 
+  where the meaning of the p_state argument might have changed.
+- Generalize and rename :class:`tenpy.networks.site.DoubleSite` to :class:`tenpy.networks.site.GroupedSite`,
+  to allow for an arbitrary number of sites to be grouped. 
+  Arguments ``site0, site1, label0, label1`` of the __init__ can be replaced with ``[site0, site1], [label0, label1]``
+  and ``op0, op1`` of the `kronecker_product` with ``[op0, op1]``; this will recover the functionality of the `DoubleSite`.
+- Restructured callstructure of Mixer in DMRG, allowing an implementation of other mixers.
+  To enable the mixer, set the DMRG parameter ``"mixer"`` to ``True`` or ``'DensityMatrixMixer'``
+  instead of just ``'Mixer'``.
+- The interaction parameter in the :class:`tenpy.models.bose_hubbbard_chain.BoseHubbardModel` (and :class:`tenpy.models.bose_hubbbard_chain.BoseHubbardChain`) 
+  did not correspond to :math:`U/2 N (N-1)` as claimed in the Hamiltonian, but to :math:`U N^2`. The correcting factor 1/2
+  and change in the chemical potential have been fixed.
+
 
 Added
 ^^^^^
 - :meth:`tenpy.networks.mps.MPS.canonical_form_infinite`.
+- :meth:`tenpy.netwoks.mps.MPS.expectation_value_term`, :meth:`tenpy.netwoks.mps.MPS.expectation_value_terms_sum` and
+  :meth:`tenpy.netwoks.mps.MPS.expectation_value_multi_site` for expectation values of terms.
 - :meth:`tenpy.linalg.np_conserved.Array.extend` and :meth:`tenpy.linalg.charges.LegCharge.extend`,
   allowing to extend an Array with zeros.
 - DMRG parameter ``'orthogonal_to'`` allows to calculate excited states for finite systems.
@@ -29,6 +45,12 @@ Added
 - :meth:`tenpy.networks.mpo.MPO.from_grids` to generate the MPO from a grid.
 - :class:`tenpy.models.model.MultiCouplingModel` for couplings involving more than 2 sites.
 - request #8: Allow shift in boundary conditions of :class:`~tenpy.models.model.CouplingModel`.
+- Allow to use state labels in :meth:`tenpy.networks.mps.from_product_state`.
+- :class:`tenpy.models.model.CouplingMPOModel` structuring the default initialization of most models.
+- :meth:`tenpy.models.model.NearestNeighborModel.calc_H_MPO_from_bond` and
+  :meth:`tenpy.models.model.MPOModel.calc_H_bond_from_MPO` for conversion of H_bond into H_MPO and vice
+  versa.
+- :class:`tenpy.algorithms.tebd.RandomUnitaryEvolution` for random unitary circuits
 
 Changed
 ^^^^^^^
@@ -36,6 +58,8 @@ Changed
 - Restructured lanczos into a class, added time evolution calculating exp(A*dt)|psi0>
 - Warning for poorly conditioned Lanczos; to overcome this enable the new parameter "reortho"
 - By default, make deep copies of npc Arrays.
+- Simplified call strucutre of :meth:`~tenpy.linalg.np_conserved.Array.extend`, and
+  :meth:`~tenpy.linalg.charges.LegCharge.extend`.
 - Restructured :mod:`tenpy.algorithms.dmrg`:
 
   - :func:`~tenpy.algorithms.dmrg.run` is now just a wrapper around the new 
@@ -51,6 +75,7 @@ Changed
   - set ``DMRG_params['P_tol_to_trunc'] = 0.05`` and provide reasonable ..._min and ..._max values.
   - increased (default) DMRG accuracy by setting
     ``DMRG_params['max_E_err'] = 1.e-5`` and ``DMRG_params['max_S_err'] = 1.e-3``.
+  - don't check the (absolute) energy for convergence in Lanczos 
 
 - Don't print the energy during real-time TEBD evolution - it's preserved up to truncation errors.
 - Renamed the `SquareLattice` class to :class:`tenpy.models.lattice.Square` for better consistency.
@@ -66,6 +91,9 @@ Fixed
 - issue #4: incompatible data types.
 - issue #6: the CouplingModel generated wrong Couplings in some cases
 - more reasonable traceback in case of wrong labels
+- wrong dtype of npc.Array when adding/subtracting/... arrays of different data types
+- could get wrong H_bond for completely decoupled chains.
+- SVD could return outer indices with different axes
 
 Removed
 ^^^^^^^

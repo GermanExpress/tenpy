@@ -17,7 +17,8 @@ def example_DMRG_finite(L, g):
     print("finite DMRG, L={L:d}, g={g:.2f}".format(L=L, g=g))
     model_params = dict(L=L, J=1., g=g, bc_MPS='finite', conserve=None, verbose=0)
     M = TFIChain(model_params)
-    psi = MPS.from_product_state(M.lat.mps_sites(), [0] * L, bc='finite')
+    product_state = ["up"] * M.lat.N_sites
+    psi = MPS.from_product_state(M.lat.mps_sites(), product_state, bc=M.lat.bc_MPS)
     dmrg_params = {
         'mixer': None,
         'trunc_params': {
@@ -27,8 +28,8 @@ def example_DMRG_finite(L, g):
         'max_E_err': 1.e-10,
         'verbose': 1
     }
-    dmrg.run(psi, M, dmrg_params)
-    E = np.sum(psi.expectation_value(M.H_bond[1:]))
+    info = dmrg.run(psi, M, dmrg_params)
+    E = info['E']
     print("E = {E:.13f}".format(E=E))
     print("final bond dimensions: ", psi.chi)
     if L < 20:  # compare to exact result
@@ -42,7 +43,8 @@ def example_DMRG_infinite(g):
     print("infinite DMRG, g={g:.2f}".format(g=g))
     model_params = dict(L=2, J=1., g=g, bc_MPS='infinite', conserve=None, verbose=0)
     M = TFIChain(model_params)
-    psi = MPS.from_product_state(M.lat.mps_sites(), [0] * 2, bc='infinite')
+    product_state = ["up"] * M.lat.N_sites
+    psi = MPS.from_product_state(M.lat.mps_sites(), product_state, bc=M.lat.bc_MPS)
     dmrg_params = {
         'mixer': True,
         'trunc_params': {
@@ -52,8 +54,8 @@ def example_DMRG_infinite(g):
         'max_E_err': 1.e-10,
         'verbose': 1
     }
-    dmrg.run(psi, M, dmrg_params)
-    E = np.mean(psi.expectation_value(M.H_bond))
+    info = dmrg.run(psi, M, dmrg_params)
+    E = info['E']
     print("E = {E:.13f}".format(E=E))
     print("final bond dimensions: ", psi.chi)
     print("correlation length:", psi.correlation_length())

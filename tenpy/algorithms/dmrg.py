@@ -23,7 +23,6 @@ The mixer should be used initially to avoid that the algorithm gets stuck in loc
 and then slowly turned off in the end.
 
 .. todo ::
-    Need function to plot the statistics in the end
     Write UserGuide/Example!!!
 """
 # Copyright 2018 TeNPy Developers
@@ -41,7 +40,8 @@ from .truncation import truncate, svd_theta
 from ..tools.params import get_parameter, unused_parameters
 from ..tools.process import memory_usage
 
-__all__ = ['run', 'Engine', 'EngineCombine', 'EngineFracture', 'Mixer']
+__all__ = ['run', 'Engine', 'EngineCombine', 'EngineFracture', 'Mixer', 'SingleSiteMixer',
+           'TwoSiteMixer', 'DensityMatrixMixer']
 
 
 def run(psi, model, DMRG_params):
@@ -144,14 +144,20 @@ def run(psi, model, DMRG_params):
         P_tol_min                truncation error. Therefore, if `P_tol_to_trunc` is not
                                  ``None``, we update `P_tol` of `lanczos_params` to
                                  ``max_trunc_err*P_tol_to_trunc``,
-                                 restricted to the interval [`P_tol_min`, `P_tol_max`].
+                                 restricted to the interval [`P_tol_min`, `P_tol_max`],
+                                 where ``max_trunc_err`` is the maximal truncation error
+                                 (discarded weight of the Schmidt values) due to truncation
+                                 right after each Lanczos optimization during the sweeps.
         -------------- --------- ---------------------------------------------------------------
         E_tol_to_trunc float     It's reasonable to choose the Lanczos convergence criteria
         E_tol_max                ``'E_tol'`` not many magnitudes lower than the current
         E_tol_min                truncation error. Therefore, if `E_tol_to_trunc` is not
                                  ``None``, we update `E_tol` of `lanczos_params` to
                                  ``max_E_trunc*E_tol_to_trunc``,
-                                 restricted to the interval [`E_tol_min`, `E_tol_max`].
+                                 restricted to the interval [`E_tol_min`, `E_tol_max`],
+                                 where ``max_E_trunc`` is the maximal energy difference due to
+                                 truncation right after each Lanczos optimization during the
+                                 sweeps.
         ============== ========= ===============================================================
 
     Returns
@@ -240,6 +246,8 @@ class Engine(NpcLinearOperator):
         E_total     The total energy before truncation.
         ----------- -------------------------------------------------------------------
         N_lanczos   Dimension of the Krylov space used in the lanczos diagonalization.
+        ----------- -------------------------------------------------------------------
+        time        Wallclock time evolved since :attr:`time0` (in seconds).
         =========== ===================================================================
 
     sweep_stats : dict
@@ -256,6 +264,8 @@ class Engine(NpcLinearOperator):
         ------------- -------------------------------------------------------------------
         S             Maximum entanglement entropy.
         ------------- -------------------------------------------------------------------
+        time          Wallclock time evolved since :attr:`time0` (in seconds).
+        ------------- -------------------------------------------------------------------
         max_trunc_err The maximum truncation error in the last sweep
         ------------- -------------------------------------------------------------------
         max_E_trunc   Maximum change or Energy due to truncation in the last sweep.
@@ -264,6 +274,9 @@ class Engine(NpcLinearOperator):
         ------------- -------------------------------------------------------------------
         norm_err      Error of canonical form ``np.linalg.norm(psi.norm_test())``.
         ============= ===================================================================
+
+    time0 : float
+        Start time of the simulation, set in :meth:`reset_stats`.
     """
 
     def __init__(self, psi, model, DMRG_params):
@@ -284,7 +297,7 @@ class Engine(NpcLinearOperator):
 
         self.env = None
         self.ortho_to_envs = []
-        self.init_env(model)
+        self.init_env(model) # calls reset_stats
 
     def init_env(self, model=None):
         """(Re-)initialize the environment.
@@ -318,7 +331,7 @@ class Engine(NpcLinearOperator):
                 LP = self.env.get_LP(0, False)
                 LP_age = self.env.get_LP_age(0)
                 RP = self.env.get_RP(self.psi.L - 1, False)
-                RP_age = self.env.get_LP_age(self.psi.L - 1)
+                RP_age = self.env.get_RP_age(self.psi.L - 1)
                 self.chi_list = {0: self.trunc_params['chi_max']}  # chi_list makes no sense
             else:
                 LP = get_parameter(self.DMRG_params, 'LP', None, 'DMRG')
@@ -348,11 +361,12 @@ class Engine(NpcLinearOperator):
     def reset_stats(self):
         """Reset the statistics. Useful if you want to start a new DMRG run."""
         self.sweeps = get_parameter(self.DMRG_params, 'sweep_0', 0, 'DMRG')
-        self.update_stats = {'i0': [], 'age': [], 'E_total': [], 'N_lanczos': []}
+        self.update_stats = {'i0': [], 'age': [], 'E_total': [], 'N_lanczos': [], 'time': []}
         self.sweep_stats = {
             'sweep': [],
             'E': [],
             'S': [],
+            'time': [],
             'max_trunc_err': [],
             'max_E_trunc': [],
             'max_chi': [],
@@ -361,6 +375,7 @@ class Engine(NpcLinearOperator):
         self.shelve = False
         chi_max = self.chi_list[max([k for k in self.chi_list.keys() if k <= self.sweeps])]
         self.trunc_params['chi_max'] = chi_max
+        self.time0 = time.time()
 
     def __del__(self):
         DMRG_params = self.DMRG_params
@@ -382,7 +397,7 @@ class Engine(NpcLinearOperator):
             i.e. just a reference to :attr:`psi`.
         """
         DMRG_params = self.DMRG_params
-        start_time = time.time()
+        start_time = self.time0
         self.shelve = False
         # parameters for lanczos
         p_tol_to_trunc = get_parameter(DMRG_params, 'P_tol_to_trunc', 0.05, 'DMRG')
@@ -470,6 +485,7 @@ class Engine(NpcLinearOperator):
             self.sweep_stats['sweep'].append(self.sweeps)
             self.sweep_stats['E'].append(E)
             self.sweep_stats['S'].append(S)
+            self.sweep_stats['time'].append(time.time() - start_time)
             self.sweep_stats['max_trunc_err'].append(max_trunc_err)
             self.sweep_stats['max_E_trunc'].append(max_E_trunc)
             self.sweep_stats['max_chi'].append(np.max(self.psi.chi))
@@ -564,16 +580,7 @@ class Engine(NpcLinearOperator):
         """
         E_trunc_list = []
         trunc_err_list = []
-        # get schedule
-        L = self.env.L
-        if self.finite:
-            schedule_i0 = list(range(0, L - 1)) + list(range(L - 3, 0, -1))
-            update_LP_RP = [[True, False]] * (L - 2) + [[False, True]] * (L - 2)
-        else:
-            assert (L >= 2)
-            schedule_i0 = list(range(0, L)) + list(range(L, 0, -1))
-            update_LP_RP = [[True, True]] * 2 + [[True, False]] * (L-2) + \
-                           [[True, True]] * 2 + [[False, True]] * (L-2)
+        schedule_i0, update_LP_RP = self._get_sweep_schedule()
 
         # the actual sweep
         for i0, upd_env in zip(schedule_i0, update_LP_RP):
@@ -587,6 +594,7 @@ class Engine(NpcLinearOperator):
             self.update_stats['age'].append(age)
             self.update_stats['E_total'].append(E_total)
             self.update_stats['N_lanczos'].append(N_lanczos)
+            self.update_stats['time'].append(time.time() - self.time0)
             E_trunc_list.append(E_trunc)
             trunc_err_list.append(trunc_err.eps)
 
@@ -597,10 +605,9 @@ class Engine(NpcLinearOperator):
                 self.trunc_params['chi_max'] = new_chi_max
                 if self.verbose >= 1:
                     print("Setting chi_max =", new_chi_max)
-
-        # update mixer
-        if self.mixer is not None:
-            self.mixer = self.mixer.update_amplitude(self.sweeps)
+            # update mixer
+            if self.mixer is not None:
+                self.mixer = self.mixer.update_amplitude(self.sweeps)
         if meas_E_trunc:
             return np.max(trunc_err_list), np.max(E_trunc_list)
         else:
@@ -640,7 +647,7 @@ class Engine(NpcLinearOperator):
             Current size of the DMRG simulation: number of physical sites involved
             into the contraction.
         """
-        theta, theta_ortho = self.prepare_diag(i0, update_LP, update_RP)
+        theta, theta_ortho = self.prepare_diag(i0)
         age = self.env.get_LP_age(i0) + 2 + self.env.get_RP_age(i0 + 1)
         if optimize:
             E0, theta, N = self.diag(theta, theta_ortho)
@@ -659,10 +666,19 @@ class Engine(NpcLinearOperator):
                 o_env.get_RP(i0, store=True)
         E_trunc = None
         if meas_E_trunc or E0 is None:
-            E_trunc = self.env.full_contraction(i0).real
+            E_trunc = self.env.full_contraction(i0).real   # uses updated LP/RP (if calculated)
             if E0 is None:
                 E0 = E_trunc
             E_trunc = E_trunc - E0
+        # now we can also remove the LP and RP on outer bonds, which we don't need any more
+        if update_RP:  # we move to the left -> delete left LP
+            self.env.del_LP(i0)
+            for o_env in self.ortho_to_envs:
+                o_env.del_LP(i0)
+        if update_LP:  # we move to the right -> delete right RP
+            self.env.del_RP(i0+1)
+            for o_env in self.ortho_to_envs:
+                o_env.del_RP(i0+1)
         return E0, E_trunc, err, N, age
 
     def prepare_diag(self, i0, update_LP, update_RP):
@@ -679,7 +695,7 @@ class Engine(NpcLinearOperator):
             Current best guess for the ground state, which is to be optimized.
         theta_ortho : list of :class:`~tenpy.linalg.np_conserved.Array`
             States (with the same tensor structure) to orthogonalize against,
-            c.f. see :meth:`get_theta_ortho`.
+            see :meth:`get_theta_ortho`.
         """
         raise NotImplementedError("This function should be implemented in derived classes")
 
@@ -698,7 +714,7 @@ class Engine(NpcLinearOperator):
         """
         theta_ortho = []
         for o_env in self.ortho_to_envs:
-            theta = o_env.ket.get_theta(i0, n=2)   # the envirionments are of the form <psi|ortho>
+            theta = o_env.ket.get_theta(i0, n=2)   # the environments are of the form <psi|ortho>
             LP = o_env.get_LP(i0, store=True)
             RP = o_env.get_RP(i0+1, store=True)
             theta = npc.tensordot(LP, theta, axes=('vR', 'vL'))
@@ -778,10 +794,9 @@ class Engine(NpcLinearOperator):
 
         Without a mixer, this is done by a simple svd and truncation of Schmidt values.
 
-        With a mixer, we calculate the left and right reduced density using the mixer
-        (which might include applications of `H`).
-        These density matrices are diagonalized and truncated such that we effectively perform
-        a svd for the case ``mixer.amplitude=0``.
+        With a mixer, the state is perturbed before the SVD.
+        The details of the perturbation are defined by the :class:`Mixer` class.
+
         Note that the returned `S` is a general (not diagonal) matrix, with labels ``'vL', 'vR'``.
 
         Parameters
@@ -808,125 +823,25 @@ class Engine(NpcLinearOperator):
             The truncation error introduced.
         """
         # get qtotal_LR from i0
-        qtotal_i0 = self.psi.get_B(i0, form=None).qtotal
         if self.mixer is None:
             # simple case: real svd, defined elsewhere.
+            qtotal_i0 = self.psi.get_B(i0, form=None).qtotal
             U, S, VH, err, _ = svd_theta(
                 theta, self.trunc_params, qtotal_LR=[qtotal_i0, None], inner_labels=['vR', 'vL'])
             return U, S, VH, err
-        rho_L = self.mix_rho_L(theta, i0, update_LP)
-        # don't mix left parts, when we're going to the right
-        rho_L.itranspose(['(vL.p0)', '(vL*.p0*)'])  # just to be sure of the order
-        rho_R = self.mix_rho_R(theta, i0, update_RP)
-        rho_R.itranspose(['(vR.p1)', '(vR*.p1*)'])  # just to be sure of the order
-
-        # consider the SVD `theta = U S V^H` (with real, diagonal S>0)
-        # rho_L ~=  theta theta^H = U S V^H V S U^H = U S S U^H  (for mixer -> 0)
-        # Thus, rho_L U = U S S, i.e. columns of U are the eigenvectors of rho_L,
-        # eigenvalues are S^2.
-        val_L, U = npc.eigh(rho_L)
-        U.legs[1] = U.legs[1].to_LegCharge()  # explicit conversion: avoid warning in `iproject`
-        U.iset_leg_labels(['(vL.p0)', 'vR'])
-        val_L[val_L < 0.] = 0.  # for stability reasons
-        val_L /= np.sum(val_L)
-        keep_L, _, errL = truncate(np.sqrt(val_L), self.trunc_params)
-        U.iproject(keep_L, axes='vR')  # in place
-        U = U.gauge_total_charge(1, qtotal_i0)
-        # rho_R ~=  theta^T theta^* = V^* S U^T U* S V^T = V^* S S V^T  (for mixer -> 0)
-        # Thus, rho_L V^* = V^* S S, i.e. columns of V^* are eigenvectors of rho_L
-        val_R, Vc = npc.eigh(rho_R)
-        Vc.legs[1] = Vc.legs[1].to_LegCharge()
-        Vc.iset_leg_labels(['(vR.p1)', 'vL'])
-        VH = Vc.itranspose(['vL', '(vR.p1)'])
-        val_R[val_R < 0.] = 0.  # for stability reasons
-        val_R /= np.sum(val_R)
-        keep_R, _, err_R = truncate(np.sqrt(val_R), self.trunc_params)
-        VH.iproject(keep_R, axes='vL')
-        VH = VH.gauge_total_charge(0, self.psi.get_B(i0 + 1, form=None).qtotal)
-
-        # calculate S = U^H theta V
-        theta = npc.tensordot(U.conj(), theta, axes=['(vL*.p0*)', '(vL.p0)'])  # axes 0, 0
-        theta = npc.tensordot(theta, VH.conj(), axes=['(vR.p1)', '(vR*.p1*)'])  # axes 1, 1
-        theta.ireplace_labels(['vR*', 'vL*'], ['vL', 'vR'])  # for left/right
-        # normalize `S` (as in svd_theta) to avoid blowing up numbers
-        theta /= np.linalg.norm(npc.svd(theta, compute_uv=False))
-        return U, theta, VH, errL + err_R
-
-    def mix_rho_L(self, theta, i0, mix_enabled):
-        """Calculated mixed reduced density matrix for left site.
-
-        Pictorially::
-
-            |     mix_enabled=False           mix_enabled=True
-            |
-            |    .---theta---.            .---theta-------.
-            |    |   |   |   |            |   |   |       |
-            |            |   |           LP---H0--H1--.   |
-            |    |   |   |   |            |   |   |   |   |
-            |    .---theta*--.                    |   xR  |
-            |                             |   |   |   |   |
-            |                            LP*--H0*-H1*-.   |
-            |                             |   |   |       |
-            |                             .---theta*------.
-
-        Parameters
-        ----------
-        theta : :class:`~tenpy.linalg.np_conserved.Array`
-            Ground state of the effective Hamiltonian, prepared for svd.
-        i0 : int
-            Site index; `theta` lives on ``i0, i0+1``.
-        mix_enabled : bool
-            Wheter we actually use mix_R or not.
-
-        Returns
-        -------
-        rho_L : :class:`~tenpy.linalg.np_conserved.Array`
-            A (hermitian) square array with labels ``'(vL.p0)', '(vL*.p0*)'``,
-            Mainly the reduced density matrix of the left part, but with some additional mixing.
-        """
-        raise NotImplementedError("This function should be implemented in derived classes")
-
-    def mix_rho_R(self, theta, i0, mix_enabled):
-        """Calculated mixed reduced density matrix for left site.
-
-        Pictorially::
-
-            |     mix_enabled=False           mix_enabled=True
-            |
-            |    .---theta---.           .------theta---.
-            |    |   |   |   |           |      |   |   |
-            |    |   |                   |   .--H0--H1--RP
-            |    |   |   |   |           |   |  |   |   |
-            |    .---theta*--.           |  wL  |
-            |                            |   |  |   |   |
-            |                            |   .--H0*-H1*-RP*
-            |                            |      |   |   |
-            |                            .------theta*--.
-
-        Parameters
-        ----------
-        theta : :class:`~tenpy.linalg.np_conserved.Array`
-            Ground state of the effective Hamiltonian, prepared for svd.
-        i0 : int
-            Site index; `theta` lives on ``i0, i0+1``.
-        mix_enabled : bool
-            Wheter to actually use the mixer or not.
-
-        Returns
-        -------
-        rho_R : :class:`~tenpy.linalg.np_conserved.Array`
-            A (hermitian) square array with labels ``'(vR.p1)', '(vR*.p1*)'``.
-            Mainly the reduced density matrix of the right part, but with some additional mixing.
-        """
-        raise NotImplementedError("This function should be implemented in derived classes")
+        # else: we have a mixer
+        return self.mixer.perturb_svd(self, theta, i0, update_LP, update_RP)
 
     def mixer_activate(self):
         """Set `self.mixer` to the class specified by `DMRG_params['mixer']`."""
         Mixer_class = get_parameter(self.DMRG_params, 'mixer', None, 'DMRG')
-        if Mixer_class is not None:
+        if Mixer_class:
             if Mixer_class is True:
-                Mixer_class = Mixer
+                Mixer_class = DensityMatrixMixer
             if isinstance(Mixer_class, str):
+                if Mixer_class == "Mixer":
+                    warnings.warn("Depreciation: Use `True` or `'DensityMatrixMixer'` as DMRG parameter")
+                    Mixer = "DensityMatrixMixer"
                 Mixer_class = globals()[Mixer_class]
             mixer_params = get_parameter(self.DMRG_params, 'mixer_params', {}, 'DMRG')
             mixer_params.setdefault('verbose', self.verbose / 10)  # reduced verbosity
@@ -963,6 +878,7 @@ class Engine(NpcLinearOperator):
         self.psi.set_B(i0 + 1, B1, form='B')  # right-canonical
         self.psi.set_SR(i0, S)
         # the old stored environments are now invalid
+        # => delete them to ensure that they get calculated again in :meth:`update_LP` / RP
         for o_env in self.ortho_to_envs:
             o_env.del_LP(i0 + 1)
             o_env.del_RP(i0)
@@ -979,7 +895,9 @@ class Engine(NpcLinearOperator):
         U : :class:`~tenpy.linalg.np_conserved.Array`
             The U as returned by SVD with combined legs, labels ``'(vL.p0)', 'vR'``.
         """
-        raise NotImplementedError("This function should be implemented in derived classes")
+        # NB: EngineCombine overwrites this function for a faster implementation
+        # hence the additional argument `U`
+        self.env.get_LP(i0 + 1, store=True)  # as implemented directly in the environment
 
     def update_RP(self, i0, VH):
         """Update right part of the environment.
@@ -991,7 +909,111 @@ class Engine(NpcLinearOperator):
         VH : :class:`~tenpy.linalg.np_conserved.Array`
             The VH as returned by SVD with combined legs, labels ``'vL', '(vR.p1)'``.
         """
-        raise NotImplementedError("This function should be implemented in derived classes")
+        # NB: EngineCombine overwrites this function for a faster implementation
+        # hence the additional argument `VH`
+        self.env.get_RP(i0, store=True)  # as implemented directly in the environment
+
+    def plot_update_stats(self, xaxis='time', E_exact=None, **kwargs):
+        """Plot the update statistics to display the convergence during the sweeps.
+
+        Makes two subplots, showing the energy (left) and number of lanczos iterations (right).
+
+        Parameters
+        ----------
+        xaxis : 'sweep' | 'time' | ...
+            Key of :attr:`update_stats` to be used for the x-axis of the plots.
+            ``'sweep'`` is just enumerating the number of bond updates
+            (including environment sweeps).
+        E_exact : float
+            Exact energy (for infinite systems: per site) for comparison.
+            If given, plot ``abs((E-E_exact)/E_exact)`` on a log-scale yaxis.
+        **kwargs :
+            Further keyword arguments given to ``plt.plot(...)``.
+        """
+        import matplotlib.pyplot as plt
+        ax1 = plt.subplot(1, 2, 1)
+        stats = self.update_stats
+        L = self.psi.L
+        kwargs.setdefault('marker', 'o')
+        kwargs.setdefault('linestyle', '')
+
+        E = np.array(stats['E_total'])
+        schedule, _ = self._get_sweep_schedule()
+        N = len(schedule) # bond updates per sweep
+        if xaxis is None:
+            xaxis = 'index'
+            X = np.arange(len(E))
+        elif xaxis == 'sweep':
+            X = np.arange(1, len(E)+1)/N
+        else:
+            X = np.array(stats[xaxis])
+        N_lanczos = np.array(stats['N_lanczos'])
+
+        if not self.psi.finite:
+            # use energy per site instead of total energy
+            age = np.array(stats['age'])
+            d_age = age[N:] - age[:-N]
+            d_E = E[N:] - E[:-N]
+            E = d_E/d_age
+            X = X[N:]
+            N_lanczos = N_lanczos[N:]
+        if E_exact is None:
+            ax1.plot(X, E, **kwargs)
+        else:
+            ax1.plot(X, np.abs(E-E_exact)/np.abs(E_exact), **kwargs)
+            ax1.set_yscale('log')
+        ax1.set_xlabel(xaxis)
+        ax1.set_ylabel("Energy")
+
+        ax2 = plt.subplot(1, 2, 2)
+        ax2.plot(X, N_lanczos, **kwargs)
+        ax2.set_xlabel(xaxis)
+        ax2.set_ylabel(r'$N_{lanczos}$')
+
+    def plot_sweep_stats(self, axes=None, xaxis='time', yaxis='E', exact_y_value=None, **kwargs):
+        """Plot the sweep statistics to display the convergence with the sweeps.
+
+        Parameters
+        ----------
+        axes : :class:`matplotlib.axes.Axes`
+            The axes to plot into. Defaults to ``plt.gca()``
+        xaxis, yaxis : 'sweep' | 'time' | ...
+            Key of :attr:`sweep_stats` to be used for the x-axis and y-axis of the plots.
+        exact_Y_value : float
+            Exact value for the quantity on the y-axis for comparison.
+            If given, plot ``abs((y-y_exact)/y_exact)`` on a log-scale yaxis.
+        **kwargs :
+            Further keyword arguments given to ``axes.plot(...)``.
+        """
+        if axes is None:
+            import matplotlib.pyplot as plt
+            axes = plt.gca()
+        stats = self.sweep_stats
+        L = self.psi.L
+        kwargs.setdefault('marker', 'o')
+        kwargs.setdefault('linestyle', '')
+
+        x = np.array(stats[xaxis])
+        y = np.array(stats[yaxis])
+        if exact_y_value is None:
+            axes.plot(x, y, **kwargs)
+        else:
+            axes.plot(x, np.abs(y-exact_y_value)/np.abs(exact_y_value), **kwargs)
+            axes.set_yscale('log')
+        axes.set_xlabel(xaxis)
+        axes.set_ylabel(yaxis)
+
+    def _get_sweep_schedule(self):
+        L = self.env.L
+        if self.finite:
+            schedule_i0 = list(range(0, L - 1)) + list(range(L - 3, 0, -1))
+            update_LP_RP = [[True, False]] * (L - 2) + [[False, True]] * (L - 2)
+        else:
+            assert (L >= 2)
+            schedule_i0 = list(range(0, L)) + list(range(L, 0, -1))
+            update_LP_RP = [[True, True]] * 2 + [[True, False]] * (L-2) + \
+                           [[True, True]] * 2 + [[False, True]] * (L-2)
+        return schedule_i0, update_LP_RP
 
 
 class EngineCombine(Engine):
@@ -1011,7 +1033,7 @@ class EngineCombine(Engine):
         Labels ``'(vL.p1*)', 'wL', '(vL*.p1)'`` for ket, MPO, bra.
     """
 
-    def prepare_diag(self, i0, update_LP, update_RP):
+    def prepare_diag(self, i0):
         """Prepare `self` to represent the effective Hamiltonian on sites ``(i0, i0+1)``.
 
         Parameters
@@ -1032,8 +1054,7 @@ class EngineCombine(Engine):
         LP = env.get_LP(i0, store=True)  # labels 'vR*', 'wR', 'vR'
         H1 = env.H.get_W(i0).replace_labels(['p', 'p*'], ['p0', 'p0*'])  # 'wL', 'wR', 'p0', 'p0*'
         RP = env.get_RP(i0 + 1, store=True)  # labels 'vL*', 'wL', 'vL'
-        H2 = env.H.get_W(i0 + 1).replace_labels(['p', 'p*'],
-                                                ['p1', 'p1*'])  # ('wL', 'wR', 'p1', 'p1*')
+        H2 = env.H.get_W(i0 + 1).replace_labels(['p', 'p*'], ['p1', 'p1*'])  # 'wL', 'wR', 'p1', 'p1*'
         # calculate LHeff
         LHeff = npc.tensordot(LP, H1, axes=['wR', 'wL'])
         pipeL = LHeff.make_pipe(['vR*', 'p0'])
@@ -1078,102 +1099,6 @@ class EngineCombine(Engine):
         """Transform theta into matrix for svd."""
         return theta  # For this engine nothing to do.
 
-    def mix_rho_L(self, theta, i0, mix_enabled):
-        """Calculated mixed reduced density matrix for left site.
-
-        Pictorially::
-
-            |     mix_enabled=False           mix_enabled=True
-            |
-            |    .---theta---.            .---theta-------.
-            |    |   |   |   |            |   |   |       |
-            |            |   |           LP---H0--H1--.   |
-            |    |   |   |   |            |   |   |   |   |
-            |    .---theta*--.                    |   xR  |
-            |                             |   |   |   |   |
-            |                            LP*--H0*-H1*-.   |
-            |                             |   |   |       |
-            |                             .---theta*------.
-
-        Parameters
-        ----------
-        theta : :class:`~tenpy.linalg.np_conserved.Array`
-            Ground state of the effective Hamiltonian, prepared for svd.
-        i0 : int
-            Site index; `theta` lives on ``i0, i0+1``.
-        mix_enabled : bool
-            Wheter we actually use mix_R or not.
-
-        Returns
-        -------
-        rho_L : :class:`~tenpy.linalg.np_conserved.Array`
-            A (hermitian) square array with labels ``'(vL.p0)', '(vL*.p0*)'``,
-            Mainly the reduced density matrix of the left part, but with some additional mixing.
-        """
-        if not mix_enabled:
-            return npc.tensordot(theta, theta.conj(), axes=['(vR.p1)', '(vR*.p1*)'])
-        H = self.env.H
-        H1 = H.get_W(i0 + 1).replace_labels(['p', 'p*'], ['p1', 'p1*'])
-        mixer_xR, add_separate_Id = self.mixer.get_xR(
-            H1.get_leg('wR'), H.get_IdL(i0 + 2), H.get_IdR(i0 + 1))
-        rho = npc.tensordot(self.LHeff, theta.split_legs('(vR.p1)'), axes=['(vR.p0*)', '(vL.p0)'])
-        rho = npc.tensordot(rho, H1, axes=[['p1', 'wR'], ['p1*', 'wL']])
-        rho_c = rho.conj()
-        rho = npc.tensordot(rho, mixer_xR, axes=['wR', 'wL'])
-        rho = npc.tensordot(rho, rho_c, axes=(['p1', 'wL*', 'vR'], ['p1*', 'wR*', 'vR*']))
-        rho = rho.ireplace_labels(['(vR*.p0)', '(vR.p0*)'], ['(vL.p0)', '(vL*.p0*)'])
-        if add_separate_Id:
-            rho = rho + npc.tensordot(theta, theta.conj(), axes=['(vR.p1)', '(vR*.p1*)'])
-        return rho
-
-    def mix_rho_R(self, theta, i0, mix_enabled):
-        """Calculated mixed reduced density matrix for left site.
-
-        Pictorially::
-
-            |     mix_enabled=False           mix_enabled=True
-            |
-            |    .---theta---.           .------theta---.
-            |    |   |   |   |           |      |   |   |
-            |    |   |                   |   .--H0--H1--RP
-            |    |   |   |   |           |   |  |   |   |
-            |    .---theta*--.           |  wL  |
-            |                            |   |  |   |   |
-            |                            |   .--H0*-H1*-RP*
-            |                            |      |   |   |
-            |                            .------theta*--.
-
-        Parameters
-        ----------
-        theta : :class:`~tenpy.linalg.np_conserved.Array`
-            Ground state of the effective Hamiltonian, prepared for svd.
-        i0 : int
-            Site index; `theta` lives on ``i0, i0+1``.
-        mix_enabled : bool
-            Wheter to actually use the mixer or not.
-
-        Returns
-        -------
-        rho_R : :class:`~tenpy.linalg.np_conserved.Array`
-            A (hermitian) square array with labels ``'(vR.p1)', '(vR*.p1*)'``.
-            Mainly the reduced density matrix of the right part, but with some additional mixing.
-        """
-        if not mix_enabled:
-            return npc.tensordot(theta, theta.conj(), axes=['(vL.p0)', '(vL*.p0*)'])
-        H = self.env.H
-        H0 = H.get_W(i0).replace_labels(['p', 'p*'], ['p0', 'p0*'])
-        mixer_xL, add_separate_Id = self.mixer.get_xL(
-            H0.get_leg('wL'), H.get_IdL(i0), H.get_IdR(i0 - 1))
-        rho = npc.tensordot(self.RHeff, theta.split_legs('(vL.p0)'), axes=['(vL.p1*)', '(vR.p1)'])
-        rho = npc.tensordot(rho, H0, axes=[['p0', 'wL'], ['p0*', 'wR']])
-        rho_c = rho.conj()
-        rho = npc.tensordot(rho, mixer_xL, axes=['wL', 'wR'])
-        rho = npc.tensordot(rho, rho_c, axes=(['p0', 'wR*', 'vL'], ['p0*', 'wL*', 'vL*']))
-        rho.ireplace_labels(['(vL*.p1)', '(vL.p1*)'], ['(vR.p1)', '(vR*.p1*)'])
-        if add_separate_Id:
-            rho = rho + npc.tensordot(theta, theta.conj(), axes=['(vL.p0)', '(vL*.p0*)'])
-        return rho
-
     def update_LP(self, i0, U):
         """Update left part of the environment.
 
@@ -1210,7 +1135,7 @@ class EngineFracture(Engine):
 
     Due to a different contraction order in :meth:`matvec`, this engine might be faster than
     :class:`EngineCombine`, at least for large physical dimensions and if the MPO is sparse.
-    One :meth:`matvec` is :math:`O(2 \chi^3 d^2 D + 2 \chi^2 d^3 W^2 )`.
+    One :meth:`matvec` is :math:`O(2 \chi^3 d^2 W + 2 \chi^2 d^3 W^2 )`.
 
     Attributes
     ----------
@@ -1223,7 +1148,7 @@ class EngineFracture(Engine):
         Labels ``'wL, 'wR', 'p0', 'p0*'`` and ``'wL, 'wR', 'p1', 'p1*'``.
     """
 
-    def prepare_diag(self, i0, update_LP, update_RP):
+    def prepare_diag(self, i0):
         """Prepare `self` to represent the effective Hamiltonian on sites ``(i0, i0+1)``.
 
         Parameters
@@ -1283,104 +1208,6 @@ class EngineFracture(Engine):
         """Transform theta into matrix for svd."""
         return theta.combine_legs([['vL', 'p0'], ['vR', 'p1']], new_axes=[0, 1])
 
-    def mix_rho_L(self, theta, i0, mix_enabled):
-        """Calculated mixed reduced density matrix for left site.
-
-        Pictorially::
-
-            |     mix_enabled=False           mix_enabled=True
-            |
-            |    .---theta---.            .---theta-------.
-            |    |   |   |   |            |   |   |       |
-            |            |   |           LP---H0--H1--.   |
-            |    |   |   |   |            |   |   |   |   |
-            |    .---theta*--.                    |   xR  |
-            |                             |   |   |   |   |
-            |                            LP*--H0*-H1*-.   |
-            |                             |   |   |       |
-            |                             .---theta*------.
-
-        Parameters
-        ----------
-        theta : :class:`~tenpy.linalg.np_conserved.Array`
-            Ground state of the effective Hamiltonian, prepared for svd.
-        i0 : int
-            Site index; `theta` lives on ``i0, i0+1``.
-        mix_enabled : bool
-            Wheter we actually use mix_R or not.
-
-        Returns
-        -------
-        rho_L : :class:`~tenpy.linalg.np_conserved.Array`
-            A (hermitian) square array with labels ``'(vL.p0)', '(vL*.p0*)'``,
-            Mainly the reduced density matrix of the left part, but with some additional mixing.
-        """
-        if not mix_enabled:
-            return npc.tensordot(theta, theta.conj(), axes=['(vR.p1)', '(vR*.p1*)'])
-        H = self.env.H
-        mixer_xR, add_separate_Id = self.mixer.get_xR(
-            self.H1.get_leg('wR'), H.get_IdL(i0 + 2), H.get_IdR(i0 + 1))
-        rho = npc.tensordot(self.LP, theta.split_legs(['(vL.p0)', '(vR.p1)']), axes=['vR', 'vL'])
-        rho = npc.tensordot(rho, self.H0, axes=[['wR', 'p0'], ['wL', 'p0*']])
-        H1m = npc.tensordot(self.H1, mixer_xR, axes=['wR', 'wL'])
-        H1m = npc.tensordot(H1m, self.H1.conj(), axes=[['p1', 'wL*'], ['p1*', 'wR*']])
-        rho = rho.ireplace_label('vR*', 'vL').combine_legs(['vL', 'p0'])
-        rho_c = rho.conj()
-        rho = npc.tensordot(rho, H1m, axes=[['p1', 'wR'], ['p1*', 'wL']])
-        rho = npc.tensordot(rho, rho_c, axes=(['p1', 'wL*', 'vR'], ['p1*', 'wR*', 'vR*']))
-        if add_separate_Id:
-            rho = rho + npc.tensordot(theta, theta.conj(), axes=['(vR.p1)', '(vR*.p1*)'])
-        return rho
-
-    def mix_rho_R(self, theta, i0, mix_enabled):
-        """Calculated mixed reduced density matrix for left site.
-
-        Pictorially::
-
-            |     mix_enabled=False           mix_enabled=True
-            |
-            |    .---theta---.           .------theta---.
-            |    |   |   |   |           |      |   |   |
-            |    |   |                   |   .--H0--H1--RP
-            |    |   |   |   |           |   |  |   |   |
-            |    .---theta*--.           |  wL  |
-            |                            |   |  |   |   |
-            |                            |   .--H0*-H1*-RP*
-            |                            |      |   |   |
-            |                            .------theta*--.
-
-        Parameters
-        ----------
-        theta : :class:`~tenpy.linalg.np_conserved.Array`
-            Ground state of the effective Hamiltonian, prepared for svd.
-        i0 : int
-            Site index; `theta` lives on ``i0, i0+1``.
-        mix_enabled : bool
-            Wheter to actually use the mixer or not.
-
-        Returns
-        -------
-        rho_R : :class:`~tenpy.linalg.np_conserved.Array`
-            A (hermitian) square array with labels ``'(vR.p1)', '(vR*.p1*)'``.
-            Mainly the reduced density matrix of the right part, but with some additional mixing.
-        """
-        if not mix_enabled:
-            return npc.tensordot(theta, theta.conj(), axes=[['(vL.p0)'], ['(vL*.p0*)']])
-        H = self.env.H
-        mixer_xL, add_separate_Id = self.mixer.get_xL(
-            self.H0.get_leg('wL'), H.get_IdL(i0), H.get_IdR(i0 - 1))
-        rho = npc.tensordot(theta.split_legs(['(vL.p0)', '(vR.p1)']), self.RP, axes=['vR', 'vL'])
-        rho = npc.tensordot(rho, self.H1, axes=[['wL', 'p1'], ['wR', 'p1*']])
-        H0m = npc.tensordot(mixer_xL, self.H0, axes=['wR', 'wL'])
-        H0m = npc.tensordot(H0m, self.H0.conj(), axes=[['wR*', 'p0'], ['wL*', 'p0*']])
-        rho = rho.ireplace_label('vL*', 'vR').combine_legs(['vR', 'p1'])
-        rho_c = rho.conj()
-        rho = npc.tensordot(H0m, rho, axes=[['p0*', 'wR'], ['p0', 'wL']])
-        rho = npc.tensordot(rho, rho_c, axes=(['p0', 'wR*', 'vL'], ['p0*', 'wL*', 'vL*']))
-        if add_separate_Id:
-            rho = rho + npc.tensordot(theta, theta.conj(), axes=['(vL.p0)', '(vL*.p0*)'])
-        return rho
-
     def update_LP(self, i0, U):
         """Update left part of the environment.
 
@@ -1406,11 +1233,23 @@ class EngineFracture(Engine):
         self.env.get_RP(i0, store=True)  # as implemented directly in the environment
 
 
-class Mixer(object):
-    """Mixer class.
+class Mixer:
+    """Base class of a general Mixer.
 
-    .. todo ::
-        documentation/reference
+    Since DMRG performs only local updates of the state, it can get stuck in "local minima",
+    in particular if the Hamiltonain is long-range -- which is the case if one
+    maps a 2D system ("infinite cylinder") to 1D -- or if one wants to do single-site updates
+    (currently not implemented in TeNPy).
+    The idea of the mixer is to perturb the state with the terms of the Hamiltonian
+    which have contributions in both the "left" and "right" side of the system.
+    In that way, it adds fluctuation of the quantum numbers and non-zero contributions of the
+    long-range terms - leading to a significantly improved convergence of DMRG.
+
+    The strength of the perturbation is given by the `amplitude` of the mixer.
+    A good strategy is to choose an initially significant amplitude and let it decay until
+    the perturbation becomes completely irrelevant and the mixer gets disabled.
+
+    This original idea of the mixer was introduced in [White2005]_.
 
     Parameters
     ----------
@@ -1423,10 +1262,10 @@ class Mixer(object):
         ============== ========= ===============================================================
         key            type      description
         ============== ========= ===============================================================
-        amplitude      float     Initial strength of the mixer. (Should be chosen < 1.)
+        amplitude      float     Initial strength of the mixer. (Should be <= 1.)
         -------------- --------- ---------------------------------------------------------------
         decay          float     To slowly turn off the mixer, we divide `amplitude` by `decay`
-                                 after each sweep.
+                                 after each sweep. (Should be >= 1.)
         -------------- --------- ---------------------------------------------------------------
         disable_after  int       We disable the mixer completely after this number of sweeps.
         ============== ========= ===============================================================
@@ -1445,7 +1284,11 @@ class Mixer(object):
 
     def __init__(self, mixer_params):
         self.amplitude = get_parameter(mixer_params, 'amplitude', 1.e-2, 'Mixer')
+        assert self.amplitude <= 1.
         self.decay = get_parameter(mixer_params, 'decay', 2., 'Mixer')
+        assert self.decay >= 1.
+        if self.decay == 1.:
+            warnings.warn("Mixer doesn't decay")
         self.disable_after = get_parameter(mixer_params, 'disable_after', 15, 'Mixer')
         self.verbose = mixer_params.get('verbose', 0)
 
@@ -1464,11 +1307,359 @@ class Mixer(object):
             should be disabled.
         """
         self.amplitude /= self.decay
-        if sweeps >= self.disable_after and self.amplitude >= np.finfo('float').eps:
+        if sweeps >= self.disable_after or self.amplitude <= np.finfo('float').eps:
             if self.verbose >= 0.1:  # increased verbosity: the same level as DMRG
-                print("disable mixer")
+                print("disable mixer after {0:d} sweeps".format(sweeps))
             return None  # disable mixer
         return self
+
+    def perturb_svd(self, engine, theta, i0, update_LP, update_RP):
+        """Perturb the wave function and perform an SVD with truncation.
+
+        Parameters
+        ----------
+        engine : :calss:`Engine`
+            The DMRG engine calling the mixer.
+        theta : :class:`~tenpy.linalg.np_conserved.Array`
+            The optimized wave function, prepared for svd.
+        i0 : int
+            Site index; `theta` lives on ``i0, i0+1``.
+        update_LP : bool
+            Whether to calculate the next ``env.LP[i0+1]``.
+        update_RP : bool
+            Whether to calculate the next ``env.RP[i0]``.
+
+        Returns
+        -------
+        U : :class:`~tenpy.linalg.np_conserved.Array`
+            Left-canonical part of `theta`. Labels ``'(vL.p0)', 'vR'``.
+        S : 1D ndarray | 2D :class:`~tenpy.linalg.np_conserved.Array`
+            Without mixer just the singluar values of the array; with mixer it might be a general
+            matrix; see comment above.
+        VH : :class:`~tenpy.linalg.np_conserved.Array`
+            Right-canonical part of `theta`. Labels ``'vL', '(vR.p1)'``.
+        err : :class:`~tenpy.algorithms.truncation.TruncationError`
+            The truncation error introduced.
+        """
+        raise NotImplementedError("This function should be implemented in derived classes")
+
+
+class SingleSiteMixer(Mixer):
+    """Mixer for single-site DMRG.
+
+    Perform a subspace expansion following [Hubig2015]_.
+    """
+    def perturb_svd(self, engine, theta, i0, move_right, next_B):
+        """Mix extra terms to theta and perform an SVD.
+
+        We calculate the left and right reduced density using the mixer
+        (which might include applications of `H`).
+        These density matrices are diagonalized and truncated such that we effectively perform
+        a svd for the case ``mixer.amplitude=0``.
+
+        Parameters
+        ----------
+        engine : :class:`Engine`
+            The DMRG engine calling the mixer.
+        theta : :class:`~tenpy.linalg.np_conserved.Array`
+            The optimized wave function, prepared for svd.
+        i0 : int
+            The site index where `theta` lives.
+        move_right : bool
+            Whether we move to the right (``True``) or left (``False``).
+        next_B : :class:`~tenpy.linalg.np_conserved.Array`
+            The subspace expansion requires to change the tensor on the next site as well.
+            If `move_right`, it should correspond to ``engine.psi.get_B(i0+1, form='B')``.
+            If not `move_right`, it should correspond to ``engine.psi.get_B(i0-1, form='A')``.
+
+        Returns
+        -------
+        U : :class:`~tenpy.linalg.np_conserved.Array`
+            Left-canonical part of `tensordot(theta, next_B)`. Labels ``'(vL.p0)', 'vR'``.
+        S : 1D ndarray
+            (Perturbed) singular values on the new bond (between `theta` and `next_B`).
+        VH : :class:`~tenpy.linalg.np_conserved.Array`
+            Right-canonical part of `tensordot(theta, next_B)`. Labels ``'vL', '(vR.p1)'``.
+        err : :class:`~tenpy.algorithms.truncation.TruncationError`
+            The truncation error introduced.
+        """
+        theta, next_B = self.subspace_expand(engine, theta, i0, move_right, next_B)
+        qtotal_LR = [theta.qtotal, None] if move_right else [None, theta.qtotal]
+        U, S, VH, err, _ = svd_theta(theta, engine.trunc_params, qtotal_LR=qtotal_LR,
+                                     inner_labels=['vR', 'vL'])
+        if move_right:
+            VH = npc.tensordot(VH, next_B, axes=['vR', 'vL'])
+        else:
+            U = npc.tensordot(next_B, U, axes=['vR', 'vL'])
+        return U, S, VH, err
+
+    def subspace_expand(self, engine, theta, i0, move_right, next_B):
+        H = engine.env.H
+        if move_right:
+            # theta has legs (vL.p), vR
+            LHeff = engine.LHeff
+            expand = npc.tensordot(LHeff, theta, axes=[2, 0])  # (vR*.p), (vL.p)
+            expand = expand.combine_legs(['wR', 2], qconj=-1, new_axes=1) # (vR*.p), (wR.vR)
+            expand *= self.amplitude
+            theta = npc.concatenate([theta, expand], axis=1, copy=False)
+            next_B = next_B.extend('vL', expand.legs[1].conj())
+        else:  # move left
+            RHeff = engine.RHeff
+            # TODO XXX: get_W(i0) vs i0+1 for 1-site vs 2-site
+            # -> need RHeff from engine!!!
+            expand = npc.tensordot(theta, RHeff, axes=[1, 0])
+            expand = expand.combine_legs([0, 'wL'], qconj=+1)
+            expand *= self.amplitude
+            theta = npc.concatenate([theta, expand], axis=0, copy=False)
+            next_B = next_B.extend('vR', expand.legs[0].conj())
+        return theta, next_B
+
+
+class TwoSiteMixer(SingleSiteMixer):
+    """Mixer for two-site DMRG.
+
+    This is the two-site version of the mixer described in [Hubig2015]_.
+    Equivalent to the :class:`DensityMatrixMixer`, but never construct the full density matrix.
+    """
+    def perturb_svd(self, engine, theta, i0, update_LP, update_RP):
+        """Mix extra terms to theta and perform an SVD.
+
+        Parameters
+        ----------
+        engine : :class:`Engine`
+            The DMRG engine calling the mixer.
+        theta : :class:`~tenpy.linalg.np_conserved.Array`
+            The optimized wave function, prepared for svd.
+        i0 : int
+            Site index; `theta` lives on ``i0, i0+1``.
+        update_LP : bool
+            Whether to calculate the next ``env.LP[i0+1]``.
+        update_RP : bool
+            Whether to calculate the next ``env.RP[i0]``.
+
+        Returns
+        -------
+        U : :class:`~tenpy.linalg.np_conserved.Array`
+            Left-canonical part of `theta`. Labels ``'(vL.p0)', 'vR'``.
+        S : 1D ndarray | 2D :class:`~tenpy.linalg.np_conserved.Array`
+            Without mixer just the singluar values of the array; with mixer it might be a general
+            matrix; see comment above.
+        VH : :class:`~tenpy.linalg.np_conserved.Array`
+            Right-canonical part of `theta`. Labels ``'vL', '(vR.p1)'``.
+        err : :class:`~tenpy.algorithms.truncation.TruncationError`
+            The truncation error introduced.
+        """
+        # first perform an SVD as if the mixer didn't exist
+        qtotal_i0 = engine.psi.get_B(i0, form=None).qtotal
+        U, S, VH, err, _ = svd_theta(
+            theta, engine.trunc_params, qtotal_LR=[qtotal_i0, None], inner_labels=['vR', 'vL'])
+        move_right = update_LP # TODO: get argument inferred from schedule?
+        if move_right:  # move to the right
+            U, S, VH, err2 = SingleSiteMixer.perturb_svd(self, engine, U.iscale_axis(S, 1), i0, move_right, VH)
+        else: # update_RP is True
+            U, S, VH, err2 = SingleSiteMixer.perturb_svd(self, engine, VH.iscale_axis(S, 0), i0, move_right, U)
+        return U, S, VH, err + err2
+
+
+class DensityMatrixMixer(Mixer):
+    """Mixer based on density matrices.
+
+    This mixer constructs density matrices as described in the original paper [White2005]_.
+    """
+
+    def perturb_svd(self, engine, theta, i0, update_LP, update_RP):
+        """Mix extra terms to theta and perform an SVD.
+
+        We calculate the left and right reduced density using the mixer
+        (which might include applications of `H`).
+        These density matrices are diagonalized and truncated such that we effectively perform
+        a svd for the case ``mixer.amplitude=0``.
+
+        Parameters
+        ----------
+        engine : :class:`Engine`
+            The DMRG engine calling the mixer.
+        theta : :class:`~tenpy.linalg.np_conserved.Array`
+            The optimized wave function, prepared for svd.
+        i0 : int
+            Site index; `theta` lives on ``i0, i0+1``.
+        update_LP : bool
+            Whether to calculate the next ``env.LP[i0+1]``.
+        update_RP : bool
+            Whether to calculate the next ``env.RP[i0]``.
+
+        Returns
+        -------
+        U : :class:`~tenpy.linalg.np_conserved.Array`
+            Left-canonical part of `theta`. Labels ``'(vL.p0)', 'vR'``.
+        S : 1D ndarray | 2D :class:`~tenpy.linalg.np_conserved.Array`
+            Without mixer just the singluar values of the array; with mixer it might be a general
+            matrix; see comment above.
+        VH : :class:`~tenpy.linalg.np_conserved.Array`
+            Right-canonical part of `theta`. Labels ``'vL', '(vR.p1)'``.
+        err : :class:`~tenpy.algorithms.truncation.TruncationError`
+            The truncation error introduced.
+        """
+        rho_L = self.mix_rho_L(engine, theta, i0, update_LP)
+        # don't mix left parts, when we're going to the right
+        rho_L.itranspose(['(vL.p0)', '(vL*.p0*)'])  # just to be sure of the order
+        rho_R = self.mix_rho_R(engine, theta, i0, update_RP)
+        rho_R.itranspose(['(vR.p1)', '(vR*.p1*)'])  # just to be sure of the order
+
+        # consider the SVD `theta = U S V^H` (with real, diagonal S>0)
+        # rho_L ~=  theta theta^H = U S V^H V S U^H = U S S U^H  (for mixer -> 0)
+        # Thus, rho_L U = U S S, i.e. columns of U are the eigenvectors of rho_L,
+        # eigenvalues are S^2.
+        val_L, U = npc.eigh(rho_L)
+        U.legs[1] = U.legs[1].to_LegCharge()  # explicit conversion: avoid warning in `iproject`
+        U.iset_leg_labels(['(vL.p0)', 'vR'])
+        val_L[val_L < 0.] = 0.  # for stability reasons
+        val_L /= np.sum(val_L)
+        keep_L, _, errL = truncate(np.sqrt(val_L), engine.trunc_params)
+        U.iproject(keep_L, axes='vR')  # in place
+        U = U.gauge_total_charge(1, engine.psi.get_B(i0, form=None).qtotal)
+        # rho_R ~=  theta^T theta^* = V^* S U^T U* S V^T = V^* S S V^T  (for mixer -> 0)
+        # Thus, rho_L V^* = V^* S S, i.e. columns of V^* are eigenvectors of rho_L
+        val_R, Vc = npc.eigh(rho_R)
+        Vc.legs[1] = Vc.legs[1].to_LegCharge()
+        Vc.iset_leg_labels(['(vR.p1)', 'vL'])
+        VH = Vc.itranspose(['vL', '(vR.p1)'])
+        val_R[val_R < 0.] = 0.  # for stability reasons
+        val_R /= np.sum(val_R)
+        keep_R, _, err_R = truncate(np.sqrt(val_R), engine.trunc_params)
+        VH.iproject(keep_R, axes='vL')
+        VH = VH.gauge_total_charge(0, engine.psi.get_B(i0 + 1, form=None).qtotal)
+
+        # calculate S = U^H theta V
+        theta = npc.tensordot(U.conj(), theta, axes=['(vL*.p0*)', '(vL.p0)'])  # axes 0, 0
+        theta = npc.tensordot(theta, VH.conj(), axes=['(vR.p1)', '(vR*.p1*)'])  # axes 1, 1
+        theta.ireplace_labels(['vR*', 'vL*'], ['vL', 'vR'])  # for left/right
+        # normalize `S` (as in svd_theta) to avoid blowing up numbers
+        theta /= np.linalg.norm(npc.svd(theta, compute_uv=False))
+        return U, theta, VH, errL + err_R
+
+    def mix_rho_L(self, engine, theta, i0, mix_enabled):
+        """Calculated mixed reduced density matrix for left site.
+
+        Pictorially::
+
+            |     mix_enabled=False           mix_enabled=True
+            |
+            |    .---theta---.            .---theta-------.
+            |    |   |   |   |            |   |   |       |
+            |            |   |           LP---H0--H1--.   |
+            |    |   |   |   |            |   |   |   |   |
+            |    .---theta*--.                    |   xR  |
+            |                             |   |   |   |   |
+            |                            LP*--H0*-H1*-.   |
+            |                             |   |   |       |
+            |                             .---theta*------.
+
+        Parameters
+        ----------
+        engine : :class:`Engine`
+            The DMRG engine calling the mixer.
+        theta : :class:`~tenpy.linalg.np_conserved.Array`
+            Ground state of the effective Hamiltonian, prepared for svd.
+        i0 : int
+            Site index; `theta` lives on ``i0, i0+1``.
+        mix_enabled : bool
+            Whether we should perturb the density matrix.
+
+        Returns
+        -------
+        rho_L : :class:`~tenpy.linalg.np_conserved.Array`
+            A (hermitian) square array with labels ``'(vL.p0)', '(vL*.p0*)'``,
+            Mainly the reduced density matrix of the left part, but with some additional mixing.
+        """
+        if not mix_enabled:
+            return npc.tensordot(theta, theta.conj(), axes=['(vR.p1)', '(vR*.p1*)'])
+        H = engine.env.H
+        try:
+            LHeff = engine.LHeff
+        except AttributeError:
+            H0 = H.get_W(i0).replace_labels(['p', 'p*'], ['p0', 'p0*'])
+            LP = engine.env.get_LP(i0, store=False)
+            LHeff = npc.tensordot(LP, H0, axes=['wR', 'wL'])
+            pipeL = theta.get_leg('(vL.p0)')
+            LHeff = LHeff.combine_legs([['vR*', 'p0'], ['vR', 'p0*']], pipes=[pipeL, pipeL.conj()],
+                                       new_axes=[0, -1])
+        rho = npc.tensordot(LHeff, theta.split_legs('(vR.p1)'), axes=['(vR.p0*)', '(vL.p0)'])
+        rho_c = rho.conj()
+        H1 = H.get_W(i0 + 1).replace_labels(['p', 'p*'], ['p1', 'p1*'])
+        mixer_xR, add_separate_Id = self.get_xR(
+            H1.get_leg('wR'), H.get_IdL(i0 + 2), H.get_IdR(i0 + 1))
+        H1m = npc.tensordot(H1, mixer_xR, axes=['wR', 'wL'])
+        H1m = npc.tensordot(H1m, H1.conj(), axes=[['p1', 'wL*'], ['p1*', 'wR*']])
+        rho = npc.tensordot(rho, H1m, axes=[['p1', 'wR'], ['p1*', 'wL']])
+        rho = npc.tensordot(rho, rho_c, axes=(['p1', 'wL*', 'vR'], ['p1*', 'wR*', 'vR*']))
+        rho.ireplace_labels(['(vR*.p0)', '(vR.p0*)'], ['(vL.p0)', '(vL*.p0*)'])
+        if add_separate_Id:
+            rho = rho + npc.tensordot(theta, theta.conj(), axes=['(vR.p1)', '(vR*.p1*)'])
+        return rho
+
+    def mix_rho_R(self, engine, theta, i0, mix_enabled):
+        """Calculated mixed reduced density matrix for left site.
+
+        Pictorially::
+
+            |     mix_enabled=False           mix_enabled=True
+            |
+            |    .---theta---.           .------theta---.
+            |    |   |   |   |           |      |   |   |
+            |    |   |                   |   .--H0--H1--RP
+            |    |   |   |   |           |   |  |   |   |
+            |    .---theta*--.           |  wL  |
+            |                            |   |  |   |   |
+            |                            |   .--H0*-H1*-RP*
+            |                            |      |   |   |
+            |                            .------theta*--.
+
+        Parameters
+        ----------
+        engine : :class:`Engine`
+            The DMRG engine calling the mixer.
+        theta : :class:`~tenpy.linalg.np_conserved.Array`
+            Ground state of the effective Hamiltonian, prepared for svd.
+        i0 : int
+            Site index; `theta` lives on ``i0, i0+1``.
+        mix_enabled : bool
+            Whether we should perturb the density matrix.
+
+        Returns
+        -------
+        rho_R : :class:`~tenpy.linalg.np_conserved.Array`
+            A (hermitian) square array with labels ``'(vR.p1)', '(vR*.p1*)'``.
+            Mainly the reduced density matrix of the right part, but with some additional mixing.
+        """
+        if not mix_enabled:
+            return npc.tensordot(theta, theta.conj(), axes=[['(vL.p0)'], ['(vL*.p0*)']])
+        H = engine.env.H
+
+        try:
+            RHeff = engine.RHeff
+        except AttributeError:
+            H1 = H.get_W(i0+1).replace_labels(['p', 'p*'], ['p1', 'p1*'])
+            RP = engine.env.get_RP(i0 + 1, store=False)
+            RHeff = npc.tensordot(RP, H1, axes=['wL', 'wR'])
+            pipeR = theta.get_leg('(vR.p1)')
+            RHeff = RHeff.combine_legs([['vL*', 'p1'], ['vL', 'p1*']], pipes=[pipeR, pipeR.conj()],
+                                       new_axes=[-1, 0])
+
+        rho = npc.tensordot(RHeff, theta.split_legs('(vL.p0)'), axes=['(vL.p1*)', '(vR.p1)'])
+        rho_c = rho.conj()
+
+        H0 = H.get_W(i0).replace_labels(['p', 'p*'], ['p0', 'p0*'])
+        mixer_xL, add_separate_Id = self.get_xL(
+            H0.get_leg('wL'), H.get_IdL(i0), H.get_IdR(i0 - 1))
+        H0m = npc.tensordot(mixer_xL, H0, axes=['wR', 'wL'])
+        H0m = npc.tensordot(H0m, H0.conj(), axes=[['wR*', 'p0'], ['wL*', 'p0*']])
+        rho = npc.tensordot(H0m, rho, axes=[['p0*', 'wR'], ['p0', 'wL']])
+        rho = npc.tensordot(rho, rho_c, axes=(['p0', 'wR*', 'vL'], ['p0*', 'wL*', 'vL*']))
+        rho.ireplace_labels(['(vL*.p1)', '(vL.p1*)'], ['(vR.p1)', '(vR*.p1*)'])
+        if add_separate_Id:
+            rho = rho + npc.tensordot(theta, theta.conj(), axes=['(vL.p0)', '(vL*.p0*)'])
+        return rho
 
     def get_xR(self, wR_leg, Id_L, Id_R):
         """Generate the coupling of the MPO legs for the reduced density matrix.
@@ -1489,7 +1680,7 @@ class Mixer(object):
             Labels ``('wL', 'wL*')``.
         add_separate_Id : bool
             If Id_L is ``None``, we can't include the identity into `mixed_xR`,
-            so it has to be added directly in :meth:`Engine.mix_rho_L`.
+            so it has to be added directly in :meth:`mix_rho_L`.
         """
         x = self.amplitude * np.ones(wR_leg.ind_len, dtype=np.float)
         separate_Id = Id_L is None
@@ -1520,7 +1711,7 @@ class Mixer(object):
             Labels ``('wR', 'wR*')``.
         add_separate_Id : bool
             If Id_R is ``None``, we can't include the identity into `mixed_xL`,
-            so it has to be added directly in :meth:`Engine.mix_rho_R`.
+            so it has to be added directly in :meth:`mix_rho_R`.
         """
         x = self.amplitude * np.ones(wL_leg.ind_len, dtype=np.float)
         separate_Id = Id_R is None

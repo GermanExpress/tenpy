@@ -73,19 +73,20 @@ as they return the `B` in the desired form (which can be chosen as an argument).
 
 import numpy as np
 import warnings
+from functools import reduce
 import scipy.sparse.linalg.eigen.arpack
 
 from ..linalg import np_conserved as npc
 from ..linalg import sparse
+from .site import GroupedSite, group_sites
 from ..tools.misc import to_iterable, argsort
 from ..tools.math import lcm, speigs, entropy
-from functools import reduce
 from ..algorithms.truncation import TruncationError, svd_theta
 
 __all__ = ['MPS', 'MPSEnvironment', 'TransferMatrix']
 
 
-class MPS(object):
+class MPS:
     r"""A Matrix Product State, finite (MPS) or infinite (iMPS).
 
     Parameters
@@ -125,6 +126,8 @@ class MPS(object):
     norm : float
         The norm of the state, i.e. ``sqrt(<psi|psi>)``.
         Ignored for (normalized) :meth:`expectation_value`, but important for :meth:`overlap`.
+    grouped : int
+        Number of sites grouped together, see :meth:`group_sites`.
     _B : list of :class:`npc.Array`
         The 'matrices' of the MPS. Labels are ``vL, vR, p`` (in any order).
         We recommend using :meth:`get_B` and :meth:`set_B`, which will take care of the different
@@ -134,7 +137,7 @@ class MPS(object):
         May be ``None`` if the MPS is not in canonical form.
         Otherwise, ``_S[i]`` is to the left of ``_B[i]``.
         We recommend using :meth:`get_SL`, :meth:`get_SR`, :meth:`set_SL`, :meth:`set_SR`, which
-        take proper care of the boundary conditions.
+        takes proper care of the boundary conditions.
     _valid_forms : dict
         Mapping for canonical forms to a tuple ``(nuL, nuR)`` indicating that
         ``self._Bs[i] = s[i]**nuL -- Gamma[i] -- s[i]**nuR`` is saved.
@@ -166,6 +169,7 @@ class MPS(object):
         self.form = self._parse_form(form)
         self.bc = bc  # one of ``'finite', 'periodic', 'segment'``.
         self.norm = norm
+        self.grouped = 1
 
         # make copies of Bs and SVs
         self._B = [B.astype(dtype, copy=True) for B in Bs]
@@ -215,6 +219,7 @@ class MPS(object):
                            p_state,
                            bc='finite',
                            dtype=np.float,
+                           permute=True,
                            form='B',
                            chargeL=None):
         """Construct a matrix product state from a given product state.
@@ -224,17 +229,21 @@ class MPS(object):
         sites : list of :class:`~tenpy.networks.site.Site`
             The sites defining the local Hilbert space.
         p_state : iterable of {int | str | 1D array}
-            Defines the product state.
-            If ``p_state[i]`` is int, then site ``i`` is in state ``p_state[i]``.
+            Defines the product state to be represented.
             If ``p_state[i]`` is str, then site ``i`` is in state
-            ``self.sites[i].state_label(p_state[i])``.
+            ``self.sites[i].state_labels(p_state[i])``.
+            If ``p_state[i]`` is int, then site ``i`` is in state ``p_state[i]``.
             If ``p_state[i]`` is an array, then site ``i`` wavefunction is ``p_state[i]``.
-            Note that what an int means can change depending in the charges;
-            see the warning in the doc-string of :class:`~tenpy.networks.site.Site`.
         bc : {'infinite', 'finite', 'segmemt'}
             MPS boundary conditions. See docstring of :class:`MPS`.
         dtype : type or string
             The data type of the array entries.
+        permute : bool
+            The :class:`~tenpy.networks.Site` might permute the local basis states if charge
+            conservation gets enabled.
+            If `permute` is True (default), we permute the given `p_state` locally according to
+            each site's :attr:`~tenpy.networks.Site.perm`.
+            The `p_state` argument should then always be given as if `conserve=None` in the Site.
         form : (list of) {``'B' | 'A' | 'C' | 'G' | None`` | tuple(float, float)}
             Defines the canonical form. See module doc-string.
             A single choice holds for all of the entries.
@@ -270,20 +279,28 @@ class MPS(object):
         chargeL = ci.make_valid(chargeL)  # sets to zero if `None`
         legL = npc.LegCharge.from_qflat(ci, [chargeL])  # (no need to bunch)
         for p_st, site in zip(p_state, sites):
+            perm = permute
+            if isinstance(p_st, str):
+                p_st = site.state_labels[p_st]  # translate labels into "int"
+                perm = False
             try:
                 iter(p_st)
                 if len(p_st) != site.dim:
                     raise ValueError("p_state incompatible with local dim:" + repr(p_st))
                 B = np.array(p_st, dtype).reshape((site.dim, 1, 1))
             except TypeError:
+                # just an int for p_st
                 B = np.zeros((site.dim, 1, 1), dtype)
                 B[p_st, 0, 0] = 1.0
+            if perm:
+                B = B[site.perm, :, :]
             Bs.append(B)
         SVs = [[1.]] * (L + 1)
-        return cls.from_Bflat(sites, Bs, SVs, bc=bc, dtype=dtype, form=form, legL=legL)
+        return cls.from_Bflat(sites, Bs, SVs, bc, dtype, False, form, legL)
 
     @classmethod
-    def from_Bflat(cls, sites, Bflat, SVs=None, bc='finite', dtype=np.float, form='B', legL=None):
+    def from_Bflat(cls, sites, Bflat, SVs=None, bc='finite', dtype=np.float, permute=True,
+                   form='B', legL=None):
         """Construct a matrix product state from a given product state.
 
         Parameters
@@ -301,6 +318,12 @@ class MPS(object):
             MPS boundary conditions. See docstring of :class:`MPS`.
         dtype : type or string
             The data type of the array entries.
+        permute : bool
+            The :class:`~tenpy.networks.Site` might permute the local basis states if charge
+            conservation gets enabled.
+            If `permute` is True (default), we permute the given `Bflat` locally according to
+            each site's :attr:`~tenpy.networks.Site.perm`.
+            The `p_state` argument should then always be given as if `conserve=None` in the Site.
         form : (list of) {``'B' | 'A' | 'C' | 'G' | None`` | tuple(float, float)}
             Defines the canonical form of `Bflat`. See module doc-string.
             A single choice holds for all of the entries.
@@ -328,6 +351,8 @@ class MPS(object):
         Bs = []
         for i, site in enumerate(sites):
             B = np.array(Bflat[i], dtype)
+            if permute:
+                B = B[site.perm, :, :]
             # calculate the LegCharge of the right leg
             legs = [site.leg, legL, None]  # other legs are known
             legs = npc.detect_legcharge(B, ci, legs, None, qconj=-1)
@@ -501,7 +526,7 @@ class MPS(object):
                 B.iset_leg_labels(['vL', 'p', 'vR'])
             elif len(labels_L) == 0 and len(labels_R) == 0:
                 B = B.add_trivial_leg(0, label='vL', qconj=+1)
-                B = B.add_trivial_leg(2, label='vR', qconj=+1)
+                B = B.add_trivial_leg(2, label='vR', qconj=-1)
                 B.iset_leg_labels(['vL', 'p', 'vR'])
             elif len(labels_L) == 0:
                 B = B.combine_legs([labels_R], new_axes=[1], qconj=[-1])
@@ -510,7 +535,7 @@ class MPS(object):
             else:  # len(labels_R) == 0
                 B = B.combine_legs([labels_L], new_axes=[0], qconj=[+1])
                 B.iset_leg_labels(['vL', 'p'])
-                B = B.add_trivial_leg(2, label='vR', qconj=+1)
+                B = B.add_trivial_leg(2, label='vR', qconj=-1)
             Bs.append(B)
             N = 2**len(labels_R)
             Ss.append(np.ones(N) / (N**0.5))
@@ -526,6 +551,7 @@ class MPS(object):
         """
         # __init__ makes deep copies of B, S
         cp = MPS(self.sites, self._B, self._S, self.bc, self.form, self.norm)
+        cp.grouped = self.grouped
         cp._transfermatrix_keep = self._transfermatrix_keep
         return cp
 
@@ -748,6 +774,108 @@ class MPS(object):
             new_B = self.get_B(i, form=form, copy=False)  # calculates the desired form.
             self.set_B(i, new_B, form=form)
 
+    def group_sites(self, n=2, grouped_sites=None):
+        """Modify `self` inplace to group sites.
+
+        Group each `n` sites together using the :class:`~tenpy.networks.site.GroupedSite`.
+        This might allow to do TEBD with a Trotter decomposition,
+        or help the convergence of DMRG (in case of too long range interactions).
+
+        Parameters
+        ----------
+        n : int
+            Number of sites to be grouped together.
+        grouped_sites : None | list of :class:`~tenpy.networks.site.GroupedSite`
+            The sites grouped together.
+
+        See also
+        --------
+        :meth:`group_split` : Reverts the grouping.
+        """
+        self.convert_form('B')
+        if grouped_sites is None:
+            grouped_sites = group_sites(self.sites, n, charges='same')
+        else:
+            assert grouped_sites[0].n_sites == n
+        Bs = []
+        Ss = []
+        i = 0
+        for gs in grouped_sites:
+            new_B = self.get_B(i).itranspose(['vL', 'p', 'vR'])
+            for j in range(1, gs.n_sites):
+                B = self.get_B(i+j).itranspose(['vL', 'p', 'vR'])
+                new_B = npc.tensordot(new_B, B, axes=[-1, 0])
+            new_B = new_B.combine_legs(list(range(1, gs.n_sites+1)), pipes=gs.leg, qconj=+1)
+            Bs.append(new_B.iset_leg_labels(['vL', 'p', 'vR']))
+            Ss.append(self._S[i])
+            i += gs.n_sites
+        Ss.append(self._S[-1])  # right-most singular values: need L+1 entries
+        self._B = Bs
+        self._S = Ss
+        self.sites = grouped_sites
+        self.form = [self._valid_forms['B']] * len(grouped_sites)
+        self.grouped = self.grouped * n
+
+    def group_split(self, trunc_par={}):
+        """Modify `self` inplace to split previously grouped sites.
+
+        Parameters
+        ----------
+        trunc_par : dict
+            Parameters for truncation, see :func:`~tenpy.algorithms.truncation.truncate`.
+
+        Returns
+        -------
+        trunc_err : :class:`~tenpy.algorithms.truncation.TruncationError`
+            The error introduced by the truncation for the splitting.
+
+        See also
+        --------
+        :meth:`group_sites` : Should have been used before to combine sites.
+        """
+        self.convert_form('B')
+        n = self.sites[0]
+        sites = []
+        Bs = []
+        Ss = []
+        trunc_err = TruncationError()
+        for i, gs in enumerate(self.sites):
+            sites.extend(gs.sites)
+            n = gs.n_sites
+            Ss_new = []
+            Bs_new = []
+            B_gr = self.get_B(i).transpose(['vL', 'p', 'vR'])
+            del B_gr.labels['p']  # avoid warning that we split a label with out '(...)'
+            B_gr = B_gr.split_legs(1)
+            theta = self.get_theta(i, n=1).itranspose(['vL', 'p0', 'vR'])
+            del theta.labels['p0']  # avoid warning
+            theta = theta.split_legs(1)
+            # B_gr and theta have legs vL p0 p1 ... p{n-1} vR
+            combine = [list(range(n)), [-2, -1]]
+            for j in range(n-1, 0, -1):
+                # split off the right-most physical leg and vR from theta
+                # theta: vL p0 ... pj vR
+                theta = theta.combine_legs(combine, qconj=[+1, -1])
+                U, S, V, err, _ = svd_theta(theta, trunc_par, inner_labels=['vR', 'vL'])
+                Ss_new.append(S)
+                trunc_err += err
+                theta = U.split_legs(0) # vL p0 ... pj-1 vR
+                combine[0].pop()
+                B = V.split_legs(1).iset_leg_labels(['vL', 'p', 'vR'])
+                B_gr = npc.tensordot(B_gr, B.conj(), axes=[[-2, -1], [1, 2]]) # vL p0 ... pj-1 vR
+                Bs_new.append(B)
+            Bs_new.append(B_gr.iset_leg_labels(['vL', 'p', 'vR']))  # inversion free :)
+            Ss_new.append(self.get_SL(i))
+            Bs.extend(Bs_new[::-1])
+            Ss.extend(Ss_new[::-1])
+        Ss.append(self._S[-1])
+        self.sites = sites
+        self._B = Bs
+        self._S = Ss
+        self.grouped = self.grouped // n
+        self.form = [self._valid_forms['B']] * len(sites)
+        return trunc_err
+
     def entanglement_entropy(self, n=1, bonds=None, for_matrix_S=False):
         r"""Calculate the (half-chain) entanglement entropy for all nontrivial bonds.
 
@@ -791,7 +919,7 @@ class MPS(object):
             if len(s.shape) > 1:
                 if for_matrix_S:
                     # explicitly calculate Schmidt values by diagonalizing (s^dagger s)
-                    s = npc.eigvals(npc.tensordot(s.conj(), s, axes=[0, 0]))
+                    s = npc.eigvalsh(npc.tensordot(s.conj(), s, axes=[0, 0]))
                     res.append(entropy(s, n))
                 else:
                     raise ValueError("entropy with non-diagonal schmidt values")
@@ -948,7 +1076,7 @@ class MPS(object):
             sites ``i, j = coords[k]``.
         """
         #  Basically the code of get_rho_segment and entanglement_entropy,
-        #  but optimized to run in O(L^2)
+        #  but optimized to run in O(L*max_range)
         if max_range is None:
             max_range = self.L
         S_i = self.entanglement_entropy_segment(n=n)  # single-site entropy
@@ -1103,6 +1231,148 @@ class MPS(object):
             C = npc.tensordot(op, theta, axes=[ax_pstar, ax_p])  # C has same labels as theta
             E.append(npc.inner(theta, C, axes=[theta.get_leg_labels()] * 2, do_conj=True))
         return np.real_if_close(np.array(E))
+
+    def expectation_value_term(self, term, autoJW=True):
+        r"""Expectation value  ``<psi|op_i0 op_i1 ... op_iN |psi>/<psi|psi>``.
+
+        Calculates the expectation value of a tensor product of single-site operators
+        acting on different sites `i0`, `i1`, ... (not necessarily next to each other).
+        In other words, evaluate the expectation value of a term ``op0_i0 op1_i1 op2_i2 ...``.
+
+        For example the contraction of three one-site operators on sites `i0`,
+        `i1=i0+1`, `i2=i0+3` would look like::
+
+            |          .--S--B[i0]---B[i0+1]--B[i0+2]--B[i0+1]--.
+            |          |     |       |        |        |        |
+            |          |    op1     op2       |       op3       |
+            |          |     |       |        |        |        |
+            |          .--S--B*[i0]--B*[i0+1]-B*[i0+2]-B*[i0+1]-.
+
+        Parameters
+        ----------
+        term : list of (str, int)
+            List of tuples ``op, i`` where `i` is the MPS index of the site the operator
+            named `op` acts on.
+            The order inside `term` determines the order in which they act
+            (in the mathematical convention: the last operator in `term` is right-most,
+            so it acts first on a Ket).
+        autoJW : bool
+            If True (default), automatically insert Jordan Wigner strings for Fermions as needed.
+
+        Returns
+        -------
+        exp_val : float/complex
+            The expectation value of the tensorproduct of the given onsite operators,
+            ``<psi|op_i0 op_i1 ... op_iN |psi>/<psi|psi>``,
+            where ``|psi>`` is the represented MPS.
+
+        Examples
+        --------
+        >>> a = psi.expectation_value_term([('Sx', 2), ('Sz', 4)])
+        >>> b = psi.expectation_value_term([('Sz', 4), ('Sx', 2)])
+        >>> c = psi.expectation_value_multi_sites(['Sz', 'Id', 'Sz'], i0=2)
+        >>> assert a == b == c
+        """
+        # strategy: translate term into a list "ops" to be used for `expectation_value_multi_sites`
+        term = list(term)
+        i_min = min([t[1] for t in term])
+        i_max = max([t[1] for t in term])
+        ops = [None] * (i_max - i_min + 1)
+        count_JW = 0
+        for op, i in term:
+            j = i - i_min # index in ops
+            if ops[j] is not None:
+                ops[j] = ops[j] + " " + op
+            else:
+                ops[j] = op
+            if autoJW and self.sites[self._to_valid_index(i)].op_needs_JW(op):
+                count_JW += 1
+                for k in range(j):
+                    if ops[k] is not None:
+                        ops[k] = ops[k] + ' JW'
+                        if ops[k].endswith(' JW JW'):
+                            ops[k] = ops[k][:-len(' JW JW')]
+                    else:
+                        ops[k] = 'JW'
+        for i in range(len(ops)):
+            if ops[i] is None:
+                ops[i] = 'Id'
+        if count_JW % 2 == 1:
+            raise ValueError("Odd number of operators which need a Jordan Wigner string")
+        return self.expectation_value_multi_sites(ops, i_min)
+
+    def expectation_value_multi_sites(self, operators, i0):
+        r"""Expectation value  ``<psi|op0_i0 op1_{i0+1} ... opN_{i0+N} |psi>/<psi|psi>``.
+
+        Calculates the expectation value of a tensor product of single-site operators
+        acting on different sites next to each other.
+        In other works, evaluate the expectation value of a term
+        ``op0_i0 op1_{i0+1} op2_{i0+2} ...``.
+
+        Parameters
+        ----------
+        operators : List of { :class:`~tenpy.linalg.np_conserved.Array` | str }
+            List of one-site operators. This method calculates the
+            expectation value of the n-sites operator given by their tensor
+            product.
+        i0 : int
+            The left most index on which an operator acts, i.e.,
+            ``operators[i]`` acts on site ``i + i0``.
+
+        Returns
+        -------
+        exp_val : float/complex
+            The expectation value of the tensorproduct of the given onsite operators,
+            ``<psi|operators[0]_{i0} operators[1]_{i0+1} ... |psi>/<psi|psi>``,
+            where ``|psi>`` is the represented MPS.
+        """
+        op = operators[0]
+        if (isinstance(op, str)):
+            op = self.sites[self._to_valid_index(i0)].get_op(op)
+        theta = self.get_theta(i0, 1)
+        C = npc.tensordot(op, theta, axes=['p*', 'p0'])
+        C = npc.tensordot(theta.conj(), C, axes = [['p0*', 'vL*'],['p', 'vL']])
+        for j in range(1, len(operators)):
+            op = operators[j] # the operator
+            i = i0 + j  # the site it acts on
+            B = self.get_B(i, form='B')
+            C = npc.tensordot(C, B, axes=['vR', 'vL'])
+            if op != 'Id':
+                if (isinstance(op, str)):
+                    op = self.sites[self._to_valid_index(i)].get_op(op)
+                C = npc.tensordot(op, C, axes=['p*', 'p'])
+            C = npc.tensordot(B.conj(), C, axes=[['vL*','p*'],['vR*','p']])
+        exp_val = npc.trace(C, 'vR*', 'vR')
+        return np.real_if_close(exp_val)
+
+    def expectation_value_terms_sum(self, term_list, prefactors):
+        """Calculate expectation values for a bunch of terms and sum them up.
+
+        Parameters
+        ----------
+        term_list : list of terms
+            Each `term` should have the form ``[(Op1, site1), (Op2, site2), ...]``.
+        prefactors : list of (complex) floats
+            Prefactors for the ``total_sum`` to be evaluated.
+
+        Returns
+        -------
+        terms_sum : list of (complex) float
+            Equivalent to ``sum([t*f for t, f in zip(terms, prefactors)])``.
+        cache :
+            Intermediate results. Currently the values for each of the term, but this might be
+            changed soon.
+
+        See also
+        --------
+        :meth:`expectation_value_term`: evaluates a single `term`.
+        """
+        # TODO: this is a naive implementation. For efficiency a caching is necessary:
+        # We need to evaluate the expectation values of terms starting with the same operator(s)
+        # from the left at the same time to avoid doing the same work many times.
+        terms = [self.expectation_value_term(term) for term in term_list]
+        terms_sum = sum([t*f for t, f in zip(terms, prefactors)])
+        return terms_sum, terms
 
     def correlation_function(self,
                              ops1,
@@ -2123,7 +2393,7 @@ class MPS(object):
         return Gl, np.ones(Yr.legs[0].ind_len, np.float)
 
 
-class MPSEnvironment(object):
+class MPSEnvironment:
     """Stores partial contractions of :math:`<bra|Op|ket>` for local operators `Op`.
 
     The network for a contraction :math:`<bra|Op|ket>` of a local operator `Op`, say exemplary
@@ -2347,7 +2617,8 @@ class MPSEnvironment(object):
         The full contraction of the environments gives the overlap ``<bra|ket>``,
         taking into account :attr:`MPS.norm` of both `bra` and `ket`.
         For this purpose, this function contracts
-        ``get_LP(i0+1, store=False)`` and ``get_RP(i0, store=False)``.
+        ``get_LP(i0+1, store=False)`` and ``get_RP(i0, store=False)`` with appropriate singular
+        values inbetween.
 
         Parameters
         ----------

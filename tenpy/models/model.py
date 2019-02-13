@@ -1,53 +1,510 @@
-"""This module contains some base classes for a model.
+"""This module contains some base classes for models.
 
 A 'model' is supposed to represent a Hamiltonian in a generalized way.
-Beside a :class:`~tenpy.models.lattice.Lattice` specifying the geometry and
-underlying Hilbert space, it thus needs some way to represent the different terms
-of the Hamiltonian.
+The :class:`~tenpy.models.lattice.Lattice` specifies the geometry and
+underlying Hilbert space, and is thus common to all models.
+It is needed to intialize the common base class :class:`Model` of all models.
 
 Different algorithms require different representations of the Hamiltonian.
-For example, if you only want to do DRMG, it is enough to specify the Hamiltonian
-as an MPO with a :class:`MPOModel`.
-On the other hand, TEBD needs the model to be 'nearest neighbor' and thus
-a representation by nearest-neighbor terms.
+For example for DMRG, the Hamiltonian needs to be given as an MPO,
+while TEBD needs the Hamiltonian to be represented by 'nearest neighbor' bond terms.
+This module contains the base classes defining these possible representations,
+namley the :class:`MPOModel` and :class:`NearestNeigborModel`.
+
+A particular model like the :class:`~tenpy.models.models.xxz_chain.XXZ_chain` should then
+yet another class derived from these classes. In it's __init__, it needs to explicitly call
+the ``MPOModel.__init__(self, lattice, H_MPO)``, providing an MPO representation of H,
+and also the ``NearestNeigborModel.__init__(self, lattice, H_bond)``,
+providing a representation of H by bond terms `H_bond`.
 
 The :class:`CouplingModel` is the attempt to generalize the representation of `H`
-by explicitly specifying the couplings of onsite-terms, and providing functionality
-for converting the specified couplings into an MPO or nearest-neighbor bonds.
-This allows to quickly generate new model classes for a broad class of Hamiltonians.
+by explicitly specifying the couplings in a general way, and providing functionality
+for converting them into `H_MPO` and `H_bond`.
+This allows to quickly generate new model classes for a very broad class of Hamiltonians.
+
 For simplicity, the :class:`CouplingModel` is limited to interactions involving only two sites.
-However, we also provide the :class:`MultiCouplingModel` to generate Models for Hamiltonians
+Yet, we also provide the :class:`MultiCouplingModel` to generate Models for Hamiltonians
 involving couplings between multiple sites.
 
-For other cases (e.g. exponentially decaying long-range interactions in 1D),
-it might be simpler to just specify the MPO explicitly.
+The :class:`CouplingMPOModel` aims at structuring the initialization for most models is used
+as base class in (most of) the predefined models in TeNPy.
 
-Of course, we also provide ways to transform a :class:`NearestNeighborModel` into a
-:class:`MPOModel` and vice versa, as far as this is possible.
-
-See also the introduction :doc:`../intro_model`.
+See also the introduction in :doc:`/intro_model`.
 """
 # Copyright 2018 TeNPy Developers
 
 import numpy as np
 import warnings
 
+from .lattice import get_lattice, Lattice, TrivialLattice
 from ..linalg import np_conserved as npc
-from ..tools.misc import to_array
+from ..linalg.charges import QTYPE, LegCharge
+from ..tools.misc import to_array, add_with_None_0
+from ..tools.params import get_parameter, unused_parameters
 from ..networks import mpo  # used to construct the Hamiltonian as MPO
+from ..networks.site import group_sites
 
-__all__ = ['CouplingModel', 'MultiCouplingModel', 'NearestNeighborModel', 'MPOModel']
+__all__ = ['Model', 'NearestNeighborModel', 'MPOModel', 'CouplingModel', 'MultiCouplingModel',
+           'CouplingMPOModel']
 
 
-class CouplingModel(object):
+class Model:
+    """Base class for all models.
+
+    The common base to all models is the underlying Hilbert space and geometry, specified by a
+    :class:`~tenpy.model.lattice.Lattice`.
+
+    Parameters
+    ----------
+    lattice : :class:`~tenpy.model.lattice.Lattice`
+        The lattice defining the geometry and the local Hilbert space(s).
+
+    Attributes
+    ----------
+    lat : :class:`~tenpy.model.lattice.Lattice`
+        The lattice defining the geometry and the local Hilbert space(s).
+    """
+    def __init__(self, lattice):
+        # NOTE: every subclass like CouplingModel, MPOModel, NearestNeigborModel calls this
+        # __init__, so it get's called multiple times when a user implements e.g. a
+        # class MyModel(CouplingModel, NearestNeigborModel, MPOModel).
+        if not hasattr(self, 'lat'):
+            # first call: initialize everything
+            self.lat = lattice
+        else:
+            # Model.__init__() got called before
+            if self.lat is not lattice:  # expect the *same instance*!
+                raise ValueError("Model.__init__() called with different lattice instances.")
+
+    def group_sites(self, n=2, grouped_sites=None):
+        """Modify `self` in place to group sites.
+
+        Group each `n` sites together using the :class:`~tenpy.networks.site.GroupedSite`.
+        This might allow to do TEBD with a Trotter decomposition,
+        or help the convergence of DMRG (in case of too long range interactions).
+
+        This has to be done after finishing initialization and can not be reverted.
+
+        Parameters
+        ----------
+        n : int
+            Number of sites to be grouped together.
+        grouped_sites : None | list of :class:`~tenpy.networks.site.GroupedSite`
+            The sites grouped together.
+
+        Returns
+        -------
+        grouped_sites : list of :class:`~tenpy.networks.site.GroupedSite`
+            The sites grouped together.
+        """
+        if grouped_sites is None:
+            grouped_sites = group_sites(self.lat.mps_sites(), n, charges='same')
+        else:
+            assert grouped_sites[0].n_sites == n
+        self.lat = TrivialLattice(grouped_sites, bc_MPS=self.lat.bc_MPS, bc='periodic')
+        return grouped_sites
+
+
+class NearestNeighborModel(Model):
+    """Base class for a model of nearest neigbor interactions w.r.t. the MPS index.
+
+    In this class, the Hamiltonian :math:`H = \sum_{i} H_{i,i+1}` is represented by
+    "bond terms" :math:`H_{i,i+1}` acting only on two neighboring sites `i` and `i+1`,
+    where `i` is an integer.
+    Instances of this class are suitable for :mod:`~tenpy.algorithms.tebd`.
+
+    Note that the "nearest-neighbor" in the name referst to the MPS index, not the lattice.
+    In short, this works only for 1-dimensional (1D) nearest-neighbor models:
+    A 2D lattice is internally mapped to a 1D MPS "snake", and even a nearest-neighbor coupling
+    in 2D becomes long-range in the MPS chain.
+
+    Parameters
+    ----------
+    lattice : :class:`tenpy.model.lattice.Lattice`
+        The lattice defining the geometry and the local Hilbert space(s).
+    H_bond : list of :class:`~tenpy.linalg.np_conserved.Array`
+        The Hamiltonian rewritten as ``sum_i H_bond[i]`` for MPS indices ``i``.
+        ``H_bond[i]`` acts on sites ``(i-1, i)``; we require ``len(H_bond) == lat.N_sites``.
+        Legs of each ``H_bond[i]`` are ``['p0', 'p0*', 'p1', 'p1*']``.
+
+    Attributes
+    ----------
+    H_bond : list of :class:`npc.Array`
+        The Hamiltonian rewritten as ``sum_i H_bond[i]`` for MPS indices ``i``.
+        ``H_bond[i]`` acts on sites ``(i-1, i)``.
+        Legs of each ``H_bond[i]`` are ``['p0', 'p0*', 'p1', 'p1*']``.
+    """
+
+    def __init__(self, lattice, H_bond):
+        Model.__init__(self, lattice)
+        self.H_bond = list(H_bond)
+        if self.lat.bc_MPS != 'infinite':
+            assert self.H_bond[0] is None
+        NearestNeighborModel.test_sanity(self)
+        # like self.test_sanity(), but use the version defined below even for derived class
+
+    def test_sanity(self):
+        if len(self.H_bond) != self.lat.N_sites:
+            raise ValueError("wrong len of H_bond")
+
+    def trivial_like_NNModel(self):
+        """Return a NearestNeighborModel with same lattice, but trivial (H=0) bonds."""
+        triv_H = [H.zeros_like() if H is not None else None for H in self.H_bond]
+        return NearestNeighborModel(self.lat, triv_H)
+
+    def bond_energies(self, psi):
+        """Calculate bond energies <psi|H_bond|psi>.
+
+        Parameters
+        ----------
+        psi : :class:`~tenpy.networks.mps.MPS`
+            The MPS for which the bond energies should be calculated.
+
+        Returns
+        -------
+        E_bond : 1D ndarray
+            List of bond energies: for finite bc, ``E_Bond[i]`` is the energy of bond ``i, i+1``.
+            (i.e. we omit bond 0 between sites L-1 and 0);
+            for infinite bc ``E_bond[i]`` is the energy of bond ``i-1, i``.
+        """
+        if self.lat.bc_MPS == 'infinite':
+            return psi.expectation_value(self.H_bond, axes=(['p0', 'p1'], ['p0*', 'p1*']))
+        # else
+        return psi.expectation_value(self.H_bond[1:], axes=(['p0', 'p1'], ['p0*', 'p1*']))
+
+    def group_sites(self, n=2, grouped_sites=None):
+        """Modify `self` in place to group sites.
+
+        Group each `n` sites together using the :class:`~tenpy.networks.site.GroupedSite`.
+        This might allow to do TEBD with a Trotter decomposition,
+        or help the convergence of DMRG (in case of too long range interactions).
+
+        This has to be done after finishing initialization and can not be reverted.
+
+        Parameters
+        ----------
+        n : int
+            Number of sites to be grouped together.
+        grouped_sites : None | list of :class:`~tenpy.networks.site.GroupedSite`
+            The sites grouped together.
+
+        Returns
+        -------
+        grouped_sites : list of :class:`~tenpy.networks.site.GroupedSite`
+            The sites grouped together.
+        """
+        grouped_sites = super().group_sites(n, grouped_sites)
+        old_L = len(self.H_bond)
+        new_L = len(grouped_sites)
+        finite = self.H_bond[0] is None
+        H_bond = [None]*(new_L + 1)
+        i = 0  # old index
+        for k, gs in enumerate(grouped_sites):
+            # calculate new_Hb on bond (k, k+1)
+            next_gs = grouped_sites[(k + 1) % new_L]
+            new_H_onsite = None  # collect old H_bond terms inside `gs`
+            if gs.n_sites > 1:
+                for j in range(1, gs.n_sites):
+                    old_Hb = self.H_bond[(i+j) % old_L]
+                    add_H_onsite = self._group_sites_Hb_to_onsite(gs, j, old_Hb)
+                    if new_H_onsite is None:
+                        new_H_onsite = add_H_onsite
+                    else:
+                        new_H_onsite = new_H_onsite + add_H_onsite
+            old_Hb = self.H_bond[(i+gs.n_sites) % old_L]
+            new_Hb = self._group_sites_Hb_to_bond(gs, next_gs, old_Hb)
+            if new_H_onsite is not None:
+                if k + 1 != new_L or not finite:
+                    # infinite or in the bulk: add new_H_onsite to new_Hb
+                    add_Hb = npc.outer(new_H_onsite, next_gs.Id.transpose(['p', 'p*']))
+                    if new_Hb is None:
+                        new_Hb = add_Hb
+                    else:
+                        new_Hb = new_Hb + add_Hb
+                else: # finite and k = new_L - 1
+                    # the new_H_onsite needs to be added to the right-most Hb
+                    add_Hb = npc.outer(prev_gs.Id.transpose(['p', 'p*']), new_H_onsite)
+                    if H_bond[-1] is None:
+                        H_bond[-1] = add_Hb
+                    else:
+                        H_bond[-1] = new_Hb + add_Hb
+            k2 = (k + 1) % new_L
+            if H_bond[k2] is None:
+                H_bond[k2] = new_Hb
+            else:
+                H_bond[k2] = H_bond[k2] + new_Hb
+            i += gs.n_sites
+        for Hb in H_bond:
+            if Hb is None:
+                continue
+            Hb.iset_leg_labels(['p0', 'p0*', 'p1', 'p1*']).itranspose(['p0', 'p1', 'p0*', 'p1*'])
+        self.H_bond = H_bond
+        return grouped_sites
+
+    def _group_sites_Hb_to_onsite(self, gr_site, j, old_Hb):
+        """kroneckerproduct for H_bond term within a GroupedSite.
+
+        `old_Hb` acts on sites (j-1, j) of `gr_sites`."""
+        if old_Hb is None:
+            return None
+        old_Hb = old_Hb.transpose(['p0', 'p0*', 'p1', 'p1*'])
+        ops = [s.Id for s in gr_site.sites[:j-1]] + [old_Hb] + [s.Id for s in gr_site.sites[j+1:]]
+        Hb = ops[0]
+        for op in ops[1:]:
+            Hb = npc.outer(Hb, op)
+        combine = [list(range(0, 2*gr_site.n_sites, 2)), list(range(1, 2*gr_site.n_sites, 2))]
+        pipe = gr_site.leg
+        Hb = Hb.combine_legs(combine, pipes=[pipe, pipe.conj()])
+        return Hb  # labels would be 'p', 'p*' w.r.t. gr_site.
+
+    def _group_sites_Hb_to_bond(self, gr_site_L, gr_site_R, old_Hb):
+        """Kroneckerproduct for H_bond term acting on two GroupedSites.
+
+        `old_Hb` acts on the right-most site of `gr_site_L` and left-most site of `gr_site_R`."""
+        if old_Hb is None:
+            return None
+        old_Hb = old_Hb.transpose(['p0', 'p0*', 'p1', 'p1*'])
+        ops = [s.Id for s in gr_site_L.sites[:-1]] + [old_Hb] + [s.Id for s in gr_site_R.sites[1:]]
+        Hb = ops[0]
+        for op in ops[1:]:
+            Hb = npc.outer(Hb, op)
+        NL, NR = gr_site_L.n_sites, gr_site_R.n_sites
+        pipeL, pipeR = gr_site_L.leg, gr_site_R.leg
+        combine = [list(range(0, 2*NL, 2)), list(range(1, 2*NL, 2)),
+                   list(range(2*NL, 2*(NL+NR), 2)), list(range(2*NL+1, 2*(NL+NR), 2))]
+        Hb = Hb.combine_legs(combine, pipes=[pipeL, pipeL.conj(), pipeR, pipeR.conj()])
+        return Hb  # labels would be 'p0', 'p0*', 'p1', 'p1*' w.r.t. gr_site_{L,R}
+
+    def calc_H_MPO_from_bond(self, tol_zero=1.e-15):
+        """Calculate the MPO Hamiltonian from the bond Hamiltonian.
+
+        Parameters
+        ----------
+        tol_zero : float
+            Arrays with norm < `tol_zero` are considered to be zero.
+
+        Returns
+        -------
+        H_MPO : :class:`~tenpy.networks.mpo.MPO`
+            MPO representation of the Hamiltonian.
+        """
+        H_bond = self.H_bond  # entry i acts on sites (i-1,i)
+        dtype = np.find_common_type([Hb.dtype for Hb in H_bond if Hb is not None], [])
+        bc = self.lat.bc_MPS
+        sites = self.lat.mps_sites()
+        L = len(sites)
+        onsite_terms = [None]*L  # onsite terms on each site `i`
+        bond_XYZ = [None]*L  # svd of couplings on each bond (i-1, i)
+        chis = [2]*(L+1)
+        assert len(self.H_bond) == L
+        for i, Hb in enumerate(H_bond):
+            if Hb is None:
+                continue
+            j = (i-1) % L
+            Hb = Hb.transpose(['p0', 'p0*', 'p1', 'p1*'])
+            d_L, d_R = sites[j].dim, sites[i].dim  # dimension of local hilbert space:
+            Id_L, Id_R = sites[i].Id, sites[j].Id
+            # project on onsite-terms by contracting with identities; Tr(Id_{L/R}) = d_{L/R}
+            onsite_L = npc.tensordot(Hb, Id_R, axes=(['p1', 'p1*'], ['p*', 'p'])) / d_R
+            if npc.norm(onsite_L) > tol_zero:
+                Hb -= npc.outer(onsite_L, Id_R)
+                onsite_terms[j] = add_with_None_0(onsite_terms[j], onsite_L)
+            onsite_R = npc.tensordot(Id_L, Hb, axes=(['p*', 'p'], ['p0', 'p0*'])) / d_L
+            if npc.norm(onsite_R) > tol_zero:
+                Hb -= npc.outer(Id_L, onsite_R)
+                onsite_terms[i] = add_with_None_0(onsite_terms[i], onsite_R)
+            if npc.norm(Hb) < tol_zero:
+                continue
+            Hb = Hb.combine_legs([['p0', 'p0*'], ['p1', 'p1*']])
+            chinfo = Hb.chinfo
+            qtotal = [chinfo.make_valid(), chinfo.make_valid()]  # zero charge
+            X, Y, Z = npc.svd(Hb, cutoff=tol_zero, inner_labels=['wR', 'wL'], qtotal_LR=qtotal)
+            assert len(Y) > 0
+            chis[i] = len(Y) + 2
+            X = X.split_legs([0])
+            YZ = Z.iscale_axis(Y, axis=0).split_legs([1])
+            bond_XYZ[i] = (X, YZ)
+            chinfo = Hb.chinfo
+        # construct the legs
+        legs = [None] * (L + 1)  # legs[i] is leg 'wL' left of site i with qconj=+1
+        for i in range(L + 1):
+            if i == L and bc == 'infinite':
+                legs[i] = legs[0]
+                break
+            chi = chis[i]
+            qflat = np.zeros((chi, chinfo.qnumber), dtype=QTYPE)
+            if chi > 2:
+                YZ = bond_XYZ[i][1]
+                qflat[1:-1, :] = Z.legs[0].to_qflat()
+            leg = LegCharge.from_qflat(chinfo, qflat, qconj=+1)
+            legs[i] = leg
+        # now construct the W tensors
+        Ws = [None] * L
+        for i in range(L):
+            wL, wR = legs[i], legs[i+1].conj()
+            p = sites[i].leg
+            W = npc.zeros([wL, wR, p, p.conj()], dtype)
+            W[0, 0, :, :] = sites[i].Id
+            W[-1, -1, :, :] = sites[i].Id
+            onsite = onsite_terms[i]
+            if onsite is not None:
+                W[0, -1, :, :] = onsite
+            if bond_XYZ[i] is not None:
+                _, YZ = bond_XYZ[i]
+                W[1:-1, -1, :, :] = YZ.itranspose(['wL', 'p1', 'p1*'])
+            j = (i + 1) % L
+            if bond_XYZ[j] is not None:
+                X, _ = bond_XYZ[j]
+                W[0, 1:-1, :, :] = X.itranspose(['wR', 'p0', 'p0*'])
+            W.iset_leg_labels(['wL', 'wR', 'p', 'p*'])
+            Ws[i] = W
+        H_MPO = mpo.MPO(sites, Ws, bc, 0, -1)
+        return H_MPO
+
+
+class MPOModel(Model):
+    """Base class for a model with an MPO representation of the Hamiltonian.
+
+    In this class, the Hamiltonian gets represented by an :class:`~tenpy.networks.mpo.MPO`.
+    Thus, instances of this class are suitable for MPO-based algorithms like DMRG
+    :mod:`~tenpy.algorithms.dmrg` and MPO time evolution.
+
+    .. todo ::
+        implement MPO for time evolution...
+
+    Parameters
+    ----------
+    H_MPO : :class:`~tenpy.networks.mpo.MPO`
+        The Hamiltonian rewritten as an MPO.
+
+    Attributes
+    ----------
+    H_MPO : :class:`tenpy.networks.mpo.MPO`
+        MPO representation of the Hamiltonian.
+    """
+
+    def __init__(self, lattice, H_MPO):
+        Model.__init__(self, lattice)
+        self.H_MPO = H_MPO
+        MPOModel.test_sanity(self)
+        # like self.test_sanity(), but use the version defined below even for derived class
+
+    def test_sanity(self):
+        if self.H_MPO.sites != self.lat.mps_sites():
+            raise ValueError("lattice incompatible with H_MPO.sites")
+
+    def group_sites(self, n=2, grouped_sites=None):
+        """Modify `self` in place to group sites.
+
+        Group each `n` sites together using the :class:`~tenpy.networks.site.GroupedSite`.
+        This might allow to do TEBD with a Trotter decomposition,
+        or help the convergence of DMRG (in case of too long range interactions).
+
+        This has to be done after finishing initialization and can not be reverted.
+
+        Parameters
+        ----------
+        n : int
+            Number of sites to be grouped together.
+        grouped_sites : None | list of :class:`~tenpy.networks.site.GroupedSite`
+            The sites grouped together.
+
+        Returns
+        -------
+        grouped_sites : list of :class:`~tenpy.networks.site.GroupedSite`
+            The sites grouped together.
+        """
+        grouped_sites = super().group_sites(n, grouped_sites)
+        self.H_MPO.group_sites(n, grouped_sites)
+        return grouped_sites
+
+    def calc_H_bond_from_MPO(self, tol_zero=1.e-15):
+        """Calculate the bond Hamiltonian from the MPO Hamiltonian.
+
+        Parameters
+        ----------
+        tol_zero : float
+            Arrays with norm < `tol_zero` are considered to be zero.
+
+        Returns
+        -------
+        H_bond : list of :class:`~tenpy.linalg.np_conserved.Array`
+            Bond terms as required by the constructor of :class:`NearestNeighborModel`.
+            Legs are ``['p0', 'p0*', 'p1', 'p1*']``
+
+        Raises
+        ------
+        ValueError : if the Hamiltonian contains longer-range terms.
+        """
+        H_MPO = self.H_MPO
+        sites = H_MPO.sites
+        finite = H_MPO.finite
+        L = H_MPO.L
+        Ws = [H_MPO.get_W(i, copy=True) for i in range(L)]
+        # Copy of Ws: we set everything to zero, which we take out and add to H_bond, such that
+        # we can check that Ws is zero in the end to ensure that H didn't have long range couplings
+        H_onsite = [None] * L
+        H_bond = [None] * L
+        # first take out onsite terms and identities
+        for i, W in enumerate(Ws):
+            # bond `a` is left of site i, bond `b` is right
+            IdL_a = H_MPO.IdL[i]
+            IdR_a = H_MPO.IdR[i]
+            IdL_b = H_MPO.IdL[i+1]
+            IdR_b = H_MPO.IdR[i+1]
+            W.itranspose(['wL', 'wR', 'p', 'p*'])
+            H_onsite[i] = W[IdL_a, IdR_b, :, :]
+            W[IdL_a, IdR_b, :, :] *= 0
+            # remove Identities
+            if IdR_a is not None:
+                W[IdR_a, IdR_b, :, :] *= 0.
+            if IdL_b is not None:
+                W[IdL_a, IdL_b, :, :] *= 0.
+        # now multiply together the bonds
+        for j, Wj in enumerate(Ws):
+            # for bond (i, j) == (j-1, j) == (i, i+1)
+            if finite and j == 0:
+                continue
+            i = (j-1) % L
+            Wi = Ws[i]
+            IdL_a = H_MPO.IdL[i]
+            IdR_c = H_MPO.IdR[j+1]
+            Hb = npc.tensordot(Wi[IdL_a, :, :, :], Wj[:, IdR_c, :, :], axes=('wR', 'wL'))
+            Wi[IdL_a, :, :, :] *= 0.
+            Wj[:, IdR_c, :, :] *= 0.
+            # Hb has legs p0, p0*, p1, p1*
+            H_bond[j] = Hb
+        # check that nothing is left
+        for W in Ws:
+            if npc.norm(W) > tol_zero:
+                raise ValueError("Bond couplings didn't capture everything. "
+                                 "Either H is long range or IdL/IdR is wrong!")
+        # now merge the onsite terms to H_bond
+        for j in range(L):
+            if finite and j == 0:
+                continue
+            i = (j - 1) % L
+            strength_i = 1. if finite and i == 0 else 0.5
+            strength_j = 1. if finite and j == L - 1 else 0.5
+            Hb = (npc.outer(sites[i].Id, strength_j * self.H_onsite[j]) +
+                  npc.outer(strength_i * self.H_onsite[i], sites[j].Id))
+            Hb = add_with_None_0(H_bond[j], Hb)
+            Hb.iset_leg_labels(['p0', 'p0*', 'p1', 'p1*'])
+            H_bond[j] = Hb
+        if finite:
+            assert H_bond[0] is None
+        return H_bond
+
+
+class CouplingModel(Model):
     """Base class for a general model of a Hamiltonian consisting of two-site couplings.
 
     In this class, the terms of the Hamiltonian are specified explicitly as onsite or coupling
     terms.
 
     .. deprecated:: 0.4.0
-        `bc_coupling` will be removed in 1.0.0. To specify the full geometry in the lattice, it
-        is the `bc` parameter of the :class:`~tenpy.model.latttice.Lattice`.
+        `bc_coupling` will be removed in 1.0.0. To specify the full geometry in the lattice,
+        use the `bc` parameter of the :class:`~tenpy.model.latttice.Lattice`.
 
     Parameters
     ----------
@@ -62,8 +519,6 @@ class CouplingModel(object):
 
     Attributes
     ----------
-    lat : :class:`~tenpy.model.lattice.Lattice`
-        The lattice defining the geometry and the local Hilbert space(s).
     onsite_terms : list of dict
         Filled by :meth:`add_onsite`.
         For each MPS index `i` a dictionary ``{'opname': strength}`` defining the onsite terms.
@@ -79,7 +534,7 @@ class CouplingModel(object):
     """
 
     def __init__(self, lattice, bc_coupling=None):
-        self.lat = lattice
+        Model.__init__(self, lattice)
         if bc_coupling is not None:
             warnings.warn("`bc_coupling` in CouplingModel: use `bc` in Lattice instead",
                           FutureWarning)
@@ -358,18 +813,24 @@ class CouplingModel(object):
             self.H_onsite = self.calc_H_onsite(tol_zero)
         finite = (self.lat.bc_MPS != 'infinite')
         N_sites = self.lat.N_sites
-        res = [None] * self.lat.N_sites
-        for i, d1 in self.coupling_terms.items():
-            j = (i + 1) % self.lat.N_sites
-            d1 = self.coupling_terms[i]
+        res = [None] * N_sites
+        for i in range(N_sites):
+            j = (i + 1) % N_sites
             site_i = self.lat.site(i)
             site_j = self.lat.site(j)
             strength_i = 1. if finite and i == 0 else 0.5
-            strength_j = 1. if finite and j == self.lat.N_sites - 1 else 0.5
+            strength_j = 1. if finite and j == N_sites - 1 else 0.5
             if finite and j == 0:  # over the boundary
                 strength_i, strength_j = 0., 0.  # just to make the assert below happy
             H = npc.outer(strength_i * self.H_onsite[i], site_j.Id)
             H = H + npc.outer(site_i.Id, strength_j * self.H_onsite[j])
+            res[j] = H
+        for i, d1 in self.coupling_terms.items():
+            j = (i + 1) % N_sites
+            d1 = self.coupling_terms[i]
+            site_i = self.lat.site(i)
+            site_j = self.lat.site(j)
+            H = res[j]
             for (op1, op_str), d2 in d1.items():
                 for j2, d3 in d2.items():
                     if isinstance(j2, tuple):
@@ -381,9 +842,10 @@ class CouplingModel(object):
                         raise ValueError(msg.format(i=i, j=j2))
                     for op2, strength in d3.items():
                         H = H + strength * npc.outer(site_i.get_op(op1), site_j.get_op(op2))
-            H.iset_leg_labels(['p0', 'p0*', 'p1', 'p1*'])
             res[j] = H
-        if finite and 0 in res:
+        for H in res:
+            H.iset_leg_labels(['p0', 'p0*', 'p1', 'p1*'])
+        if finite:
             assert (res[0].norm(np.inf) <= tol_zero)
             res[0] = None
         return res
@@ -397,7 +859,7 @@ class CouplingModel(object):
         Parameters
         ----------
         tol_zero : float
-            prefactors with ``abs(strength) < tol_zero`` are considered to be zero.
+            Prefactors with ``abs(strength) < tol_zero`` are considered to be zero.
 
         Returns
         -------
@@ -728,99 +1190,173 @@ class MultiCouplingModel(CouplingModel):
         # done
 
 
-class NearestNeighborModel(object):
-    """Base class for a model of nearest neigbor interactions (w.r.t. the MPS index).
+class CouplingMPOModel(CouplingModel,MPOModel):
+    """Combination of the CouplingModel and MPOModel.
 
-    Suitable for TEBD.
+    This class provides the interface for most of the model classes in `tenpy`.
+    Examples based on this class are given in :mod:`~tenpy.models.xxz_chain`
+    and :mod:`~tenpy.models.tf_ising`.
+
+    The ``__init__`` of this function performs the standard initialization explained
+    in :doc:`/intro_model`, by calling the methods :meth:`init_lattice` (step 1-4)
+    to initialize a lattice (which in turn calls :meth:`init_sites`) and
+    :meth:`init_terms`. The latter should be overwritten by subclasses to add the
+    desired terms.
+
+    As shown in :mod:`~tenpy.models.tf_ising`, you can get a 1D version suitable
+    for TEBD from a general-lattice model by subclassing it once more, only
+    redefining the ``__init__`` as follows::
+
+        def __init__(self, model_params):
+            CouplingMPOModel.__init__(self, model_params)
+
 
     Parameters
     ----------
-    lattice : :class:`tenpy.model.lattice.Lattice`
-        The lattice defining the geometry and the local Hilbert space(s).
-    H_bond : list of :class:`~tenpy.linalg.np_conserved.Array`
-        The Hamiltonian rewritten as ``sum_i H_bond[i]`` for MPS indices ``i``.
-        ``H_bond[i]`` acts on sites ``(i-1, i)``; we require ``len(H_bond) == lat.N_sites``.
+    model_params : dict
+        A dictionary with all the model parameters.
+        These parameters are given to the different ``init_...()`` methods, and
+        should be read out using :func:`~tenpy.tools.params.get_parameter`.
+        This may happen in any of the ``init_...()`` methods.
+        The parameter ``'verbose'`` is read out in the `__init__` of this function
+        and specifies how much status information should be printed during initialization.
 
     Attributes
     ----------
-    lat : :class:`tenpy.model.lattice.Lattice`
-        The lattice defining the geometry and the local Hilbert space(s).
-    H_bond : list of :class:`npc.Array`
-        The Hamiltonian rewritten as ``sum_i H_bond[i]`` for MPS indices ``i``.
-        ``H_bond[i]`` acts on sites ``(i-1, i)``.
+    name : str
+        The name of the model, e.g. ``"XXZChain" or ``"SpinModel"``.
+    verbose : int
+        Level of verbosity (i.e. how much status information to print); higher=more output.
     """
+    def __init__(self, model_params):
+        if getattr(self, "_called_CouplingMPOModel_init", False):
+            # If we ignore this, the same terms get added to self multiple times.
+            # In the best case, this would just rescale the energy;
+            # in the worst case we get the wrong Hamiltonian.
+            raise ValueError("Called CouplingMPOModel.__init__(...) multiple times.")
+            # To fix this problem, follow the instructions for subclassing in :doc:`/intro_model`.
+        self._called_CouplingMPOModel_init = True
+        self.name = self.__class__.__name__
+        self.verbose = get_parameter(model_params, 'verbose', 1, self.name)
+        # 1-4) iniitalize lattice
+        lat = self.init_lattice(model_params)
+        # 5) initialize CouplingModel
+        CouplingModel.__init__(self, lat)
+        # 6) add terms of the Hamiltonian
+        self.init_terms(model_params)
+        # 7) initialize H_MPO
+        MPOModel.__init__(self, lat, self.calc_H_MPO())
+        if isinstance(self, NearestNeighborModel):
+            # 8) initialize H_bonds
+            NearestNeighborModel.__init__(self, lat, self.calc_H_bond())
+        # checks for misspelled parameters
+        unused_parameters(model_params, self.name)
 
-    def __init__(self, lat, H_bond):
-        self.lat = lat
-        self.H_bond = list(H_bond)
-        if self.lat.bc_MPS != 'infinite':
-            self.H_bond[0] = None
-        NearestNeighborModel.test_sanity(self)
-        # like self.test_sanity(), but use the version defined below even for derived class
+    def init_lattice(self, model_params):
+        """Initialize a lattice for the given model parameters.
 
-    def test_sanity(self):
-        if len(self.H_bond) != self.lat.N_sites:
-            raise ValueError("wrong len of H_bond")
+        This function reads out the model parameter `lattice`.
+        This can be a full :class:`~tenpy.models.lattice.Lattice` instance,
+        in which case it is just returned without further action.
+        Alternatively, the `lattice` parameter can be a string giving the name
+        of one of the predefined lattices, which then gets initialized.
+        Depending on the dimensionality of the lattice, this requires different model parameters.
 
-    def trivial_like_NNModel(self):
-        """Return a NearestNeighborModel with same lattice, but trivial (H=0) bonds."""
-        triv_H = [H.zeros_like() if H is not None else None for H in self.H_bond]
-        return NearestNeighborModel(self.lat, triv_H)
+        The following model parameters get read out.
 
-    def bond_energies(self, psi):
-        """Calculate bond energies <psi|H_bond|psi>.
+        ============== ========= ===============================================================
+        key            type      description
+        ============== ========= ===============================================================
+        lattice        str |     The name of a lattice pre-defined in TeNPy to be initialized.
+                       Lattice   Alternatively, a (possibly self-defined) Lattice instance.
+                                 In the latter case, no further parameters are read out.
+        -------------- --------- ---------------------------------------------------------------
+        bc_MPS         str       Boundary conditions for the MPS
+        -------------- --------- ---------------------------------------------------------------
+        order          str       The order of sites within the lattice for non-trivial lattices.
+        -------------- --------- ---------------------------------------------------------------
+        L              int       The length in x-direction (or lenght of the unit cell for
+                                 infinite systems).
+                                 Only read out for 1D lattices.
+        -------------- --------- ---------------------------------------------------------------
+        Lx, Ly         int       The length in x- and y-direction.
+                                 For ``"infinite"`` `bc_MPS`, the system is infinite in
+                                 x-direction and `Lx` is the number of "rings" in the infinite
+                                 MPS unit cell, while `Ly` gives the circumference around the
+                                 cylinder or width of th the rung for a ladder (depending on
+                                 `bc_y`.
+                                 Only read out for 2D lattices.
+        -------------- --------- ---------------------------------------------------------------
+        bc_y           str       ``"cylinder" | "ladder"``.
+                                 The boundary conditions in y-direction.
+                                 Only read out for 2D lattices.
+        ============== ========= ===============================================================
 
         Parameters
         ----------
-        psi : :class:`~tenpy.networks.mps.MPS`
-            The MPS for which the bond energies should be calculated.
+        model_params : dict
+            The model parameters given to ``__init__``.
 
         Returns
         -------
-        E_bond : 1D ndarray
-            List of bond energies: for finite bc, ``E_Bond[i]`` is the energy of bond ``i, i+1``.
-            (i.e. we omit bond 0 between sites L-1 and 0);
-            for infinite bc ``E_bond[i]`` is the energy of bond ``i-1, i``.
+        lat : :class:`~tenpy.models.lattice.Lattice`
+            An initialized lattice.
         """
-        if self.lat.bc_MPS == 'infinite':
-            return psi.expectation_value(self.H_bond, axes=(['p0', 'p1'], ['p0*', 'p1*']))
-        # else
-        return psi.expectation_value(self.H_bond[1:], axes=(['p0', 'p1'], ['p0*', 'p1*']))
+        lat = get_parameter(model_params, 'lattice', "Chain", self.name)
+        if isinstance(lat, str):
+            LatticeClass = get_lattice(lattice_name=lat)
+            bc_MPS = get_parameter(model_params, 'bc_MPS', 'finite', self.name)
+            order = get_parameter(model_params, 'order', 'default', self.name)
+            sites = self.init_sites(model_params)
+            if LatticeClass.dim == 1:  # 1D lattice
+                L = get_parameter(model_params, 'L', 2, self.name)
+                # 4) lattice
+                bc = 'periodic' if bc_MPS == 'infinite' else 'open'
+                lat = LatticeClass(L, sites, bc=bc, bc_MPS=bc_MPS)
+            elif LatticeClass.dim == 2:   # 2D lattice
+                Lx = get_parameter(model_params, 'Lx', 1, self.name)
+                Ly = get_parameter(model_params, 'Ly', 4, self.name)
+                bc_y = get_parameter(model_params, 'bc_y', 'cylinder', self.name)
+                assert bc_y in ['cylinder', 'ladder']
+                bc_x = 'periodic' if bc_MPS == 'infinite' else 'open'
+                bc_y = 'periodic' if bc_y == 'cylinder' else 'open'
+                lat = LatticeClass(Lx, Ly, sites, order=order, bc=[bc_x, bc_y], bc_MPS=bc_MPS)
+            else:
+                raise ValueError("Can't auto-determine parameters for the lattice. "
+                                 "Overwrite the `init_lattice` in your model!")
+            # now, `lat` is an instance of the LatticeClass called `lattice_name`.
+        # else: a lattice was already provided
+        assert isinstance(lat, Lattice)
+        return lat
 
+    def init_sites(self, model_params):
+        """Define the local Hilbert space and operators; needs to be implemented in subclasses.
 
-class MPOModel(object):
-    """Base class for a model with an MPO representation of the Hamiltonian.
+        This function gets called by :meth:`init_lattice` to get the
+        :class:`~tenpy.networks.site.Site` for the lattice unit cell.
 
-    Suitable for MPO-based algorithms, e.g. DMRG and MPO time evolution.
+        .. note ::
+            Initializing the sites requires to define the conserved quantum numbers.
+            All pre-defined sites accept ``conserve=None`` to disable using quantum numbers.
+            Many models in TeNPy read out the `conserve` model parameter, which can be set
+            to ``"best"`` to indicate the optimal parameters.
 
-    .. todo ::
-        implement: provide (function to calculate) the MPO for time evolution.
-        Also, provide function to get H_MPO from H_bond
+        Parameters
+        ----------
+        model_params : dict
+            The model parameters given to ``__init__``.
 
-    Parameters
-    ----------
-    lattice : :class:`tenpy.model.lattice.Lattice`
-        The lattice defining the geometry and the local Hilbert space(s).
-    H_MPO : :class:`~tenpy.networks.mpo.MPO`
-        The Hamiltonian rewritten as an MPO.
+        Returns
+        -------
+        sites : (tuple of) :class:`~tenpy.networks.site.Site`
+            The local sites of the lattice, defining the local basis states and operators.
+        """
+        raise NotImplementedError("Subclasses should implement `init_sites`")
+        # or at least redefine the lattice
 
-    Attributes
-    ----------
-    lat : :class:`tenpy.model.lattice.Lattice`
-        The lattice defining the geometry and the local Hilbert space(s).
-    H_MPO : :class:`tenpy.tn.mpo.MPO`
-        MPO representation of the Hamiltonian.
-    """
-
-    def __init__(self, lat, H_MPO):
-        self.lat = lat
-        self.H_MPO = H_MPO
-        MPOModel.test_sanity(self)
-        # like self.test_sanity(), but use the version defined below even for derived class
-
-    def test_sanity(self):
-        if self.H_MPO.sites != self.lat.mps_sites():
-            raise ValueError("lattice incompatible with H_MPO.sites")
+    def init_terms(self, model_params):
+        """Add the onsite and coupling terms to the model; subclasses should implement this."""
+        pass  # Do nothing. This allows to super().init_terms(model_params) in subclasses.
 
 
 def _multi_coupling_group_handle_JW(ijkl, ops, ops_need_JW, op_string, N_sites):

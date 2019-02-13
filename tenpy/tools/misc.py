@@ -5,8 +5,8 @@ import numpy as np
 from .optimization import bottleneck
 
 all = [
-    'to_iterable', 'to_ndarray', 'anynan', 'argsort', 'inverse_permutation', 'list_to_dict_list',
-    'atleast_2d_pad', 'transpose_list_list', 'zero_if_close', 'pad'
+    'to_iterable', 'to_array', 'anynan', 'argsort', 'inverse_permutation', 'list_to_dict_list',
+    'atleast_2d_pad', 'transpose_list_list', 'zero_if_close', 'pad', 'any_nonzero'
 ]
 
 
@@ -312,7 +312,7 @@ def any_nonzero(params, keys, verbose_msg=None):
         A dictionary of parameters.
     keys : list of {key | tuple of keys}
         For a single key, check ``params[key]`` for non-zero entries.
-        For a tuple of keys, all the ``params[key]`` have to be equal.
+        For a tuple of keys, all the ``params[key]`` have to be equal (as numpy arrays).
     verbose_msg : None | str
         If params['verbose'] >= 1, we print `verbose_msg` before checking,
         and a short notice with the `key`, if a non-zero entry is found.
@@ -329,9 +329,9 @@ def any_nonzero(params, keys, verbose_msg=None):
     for k in keys:
         if isinstance(k, tuple):
             # check equality
-            val = params[k[0]]
+            val = params.get(k[0], None)
             for k1 in k[1:]:
-                if not np.all(val == params[k1]):
+                if not np.array_equal(val, params.get(k1, None)):
                     if verbose:
                         print("{k0!r} and {k1!r} have different entries.".format(k0=k[0], k1=k1))
                     return True
@@ -343,3 +343,22 @@ def any_nonzero(params, keys, verbose_msg=None):
                     print(str(k) + " has nonzero entries")
                 return True
     return False
+
+def add_with_None_0(a, b):
+    """Return ``a + b``, treating `None` as zero.
+
+    Parameters
+    ----------
+    a, b :
+        The two things to be added, or ``None``.
+
+    Returns
+    -------
+    sum :
+        ``a + b``, except if `a` or `b` is `None`, in which case the other variable is returned.
+    """
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return a + b

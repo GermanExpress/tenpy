@@ -14,7 +14,7 @@ from . import np_conserved as npc
 from scipy.sparse.linalg import LinearOperator as ScipyLinearOperator
 
 
-class NpcLinearOperator(object):
+class NpcLinearOperator:
     """Prototype for a Linear Operator acting on :class:`~tenpy.linalg.np_conserved.Array`.
 
     Note that an :class:`~tenpy.linalg.np_conserved.Array` implements a matvec function.
@@ -86,7 +86,7 @@ class FlatLinearOperator(ScipyLinearOperator):
         self._charge_sector = None
         self._mask = None
         self.charge_sector = charge_sector  # uses the setter
-        super(FlatLinearOperator, self).__init__(self.dtype, self.shape)
+        ScipyLinearOperator.__init__(self, self.dtype, self.shape)
 
     @classmethod
     def from_NpcArray(cls, mat, charge_sector=0):

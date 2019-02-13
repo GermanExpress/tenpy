@@ -27,8 +27,8 @@ bc_choices = {'open': True, 'periodic': False}
 """dict: maps possible choices of boundary conditions in a lattice to bool/int."""
 
 
-class Lattice(object):
-    r"""A general lattice.
+class Lattice:
+    r"""A general, regular lattice.
 
     The lattice consists of a **unit cell** which is repeated in `dim` different directions.
     A site of the lattice is thus identified by **lattice indices** ``(x_0, ..., x_{dim-1}, u)``,
@@ -140,8 +140,8 @@ class Lattice(object):
         self.N_cells = int(np.prod(self.Ls))
         self.shape = self.Ls + (len(unit_cell), )
         self.N_sites = int(np.prod(self.shape))
-        self.N_sites_per_ring = int(self.N_sites // self.Ls[0])
         self.N_rings = self.Ls[0]
+        self.N_sites_per_ring = int(self.N_sites // self.N_rings)
         if positions is None:
             positions = np.zeros((len(self.unit_cell), self.dim))
         if basis is None:
@@ -165,6 +165,7 @@ class Lattice(object):
 
     def test_sanity(self):
         """Sanity check. Raises ValueErrors, if something is wrong."""
+        assert self.dim == len(self.Ls)
         assert self.shape == self.Ls + (len(self.unit_cell), )
         assert self.N_cells == np.prod(self.Ls)
         assert self.N_sites == np.prod(self.shape)
@@ -499,7 +500,7 @@ class Lattice(object):
 
         Parameters
         ----------
-        ax : matplotlib.pyplot.Axes
+        ax : :class:`matplotlib.axes.Axes`
             The axes on which we should plot.
         markers : list
             List of values for the keywork `marker` of ``ax.plot()`` to distinguish the different
@@ -525,7 +526,7 @@ class Lattice(object):
 
         Parameters
         ----------
-        ax : matplotlib.pyplot.Axes
+        ax : :class:`matplotlib.axes.Axes`
             The axes on which we should plot.
         order : None | 2D array (self.N_sites, self.dim+1)
             The order as returned by :meth:`ordering`; by default (``None``) use :attr:`order`.
@@ -554,7 +555,7 @@ class Lattice(object):
 
         Parameters
         ----------
-        ax : matplotlib.pyplot.Axes
+        ax : :class:`matplotlib.axes.Axes`
             The axes on which we should plot.
         coupling : list of (u1, u2, dx)
             Specifies the connections to be plotted; iteating over lattice indices `(i0, i1, ...)`,
@@ -600,7 +601,7 @@ class Lattice(object):
 
         Parameters
         ----------
-        ax : matplotlib.pyplot.Axes
+        ax : :class:`matplotlib.axes.Axes`
             The axes on which we should plot.
         **kwargs :
             Keyword arguments specifying the "arrowprops" of ``ax.annotate``.
@@ -621,7 +622,7 @@ class Lattice(object):
 
         Parameters
         ----------
-        ax : matplotlib.pyplot.Axes
+        ax : :class:`matplotlib.axes.Axes`
             The axes on which we should plot.
         direction : int
             The direction of the lattice along which we should mark the idenitified sites.
@@ -685,6 +686,48 @@ class Lattice(object):
         self.bc = np.array(bc)
 
 
+class TrivialLattice(Lattice):
+    """Trivial lattice consisting of a single (possibly large) unit cell in 1D.
+
+    This is usefull if you need a valid :class:`Lattice` given just the :meth:`mps_sites`.
+
+    Parameters
+    ----------
+    mps_sites : list of :class:`~tenpy.networks.Site`
+        The sites making up a unit cell of the lattice.
+    **kwargs :
+        Further keyword arguments given to :class:`Lattice`.
+    """
+    def __init__(self, mps_sites, **kwargs):
+        Lattice.__init__(self, [1], mps_sites, **kwargs)
+
+
+class IrregularLattice(Lattice):
+    """A variant of a regular lattice, where we might have extra sites or sites missing."""
+    def __init__(self, mps_sites, based_on, order=None):
+        self.based_on = based_on
+        self._mps_sites = mps_sites
+        Lattice.__init__(self, based_on.Ls, based_on.unit_cell, order='default',
+                         bc=based_on.bc, bc_MPS=based_on.bc_MPS)
+        # don't copy nearest_neighbors, basis, positions etc: no longer valid
+        self.N_sites = len(mps_sites)
+        self._order = order
+
+
+    @classmethod
+    def from_mps_sites(cls, mps_sites, based_on=None):
+        if based_on is None:
+            based_on = k
+        return cls(mps_sites, based_on)
+
+    @classmethod
+    def from_add_sites(self, M):
+        raise NotImplementedError()
+
+    def mps_sites(self):
+        return self._mps_sites
+
+
 class SimpleLattice(Lattice):
     """A lattice with a unit cell consiting of just a single site.
 
@@ -721,7 +764,7 @@ class SimpleLattice(Lattice):
             snake_winding = tuple(snake_winding) + (False, )
             priority = tuple(priority) +  (max(priority) + 1., )
             kwargs['order'] = descr, snake_winding, priority
-        super().__init__(Ls, [site], **kwargs)
+        Lattice.__init__(self, Ls, [site], **kwargs)
 
     def mps2lat_values(self, A, axes=0, u=None):
         """same as :meth:`Lattice.mps2lat_values`, but ignore ``u``, setting it to ``0``."""
@@ -746,13 +789,14 @@ class Chain(SimpleLattice):
         the `snake_winding` and `priority` should only be specified for the spatial directions.
         Similarly, `positions` can be specified as a single vector.
     """
+    dim = 1
 
     def __init__(self, L, site, **kwargs):
         kwargs.setdefault('nearest_neighbors', [(0, 0, np.array([1,]))])
         kwargs.setdefault('next_nearest_neighbors', [(0, 0, np.array([2,]))])
         kwargs.setdefault('next_next_nearest_neighbors', [(0, 0, np.array([3,]))])
         # and otherwise default values.
-        super().__init__([L], site, **kwargs)
+        SimpleLattice.__init__(self, [L], site, **kwargs)
 
 
 class Ladder(Lattice):
@@ -771,8 +815,9 @@ class Ladder(Lattice):
         Additional keyword arguments given to the :class:`Lattice`.
         `basis`, `pos` and `[[next_]next_]nearest_neighbors` are set accordingly.
     """
+    dim = 1
 
-    def __init__(self, Lx, sites, **kwargs):
+    def __init__(self, L, sites, **kwargs):
         sites = _parse_sites(sites, 2)
         basis = np.array([[1., 0.]])
         pos = np.array([[0., 0.], [0., 1.]])
@@ -784,7 +829,7 @@ class Ladder(Lattice):
         kwargs.setdefault('nearest_neighbors', NN)
         kwargs.setdefault('next_nearest_neighbors', nNN)
         kwargs.setdefault('next_next_nearest_neighbors', nnNN)
-        super().__init__([Lx], sites, **kwargs)
+        Lattice.__init__(self, [L], sites, **kwargs)
 
 
 class Square(SimpleLattice):
@@ -805,6 +850,7 @@ class Square(SimpleLattice):
         the `snake_winding` and `priority` should only be specified for the spatial directions.
         Similarly, `positions` can be specified as a single vector.
     """
+    dim = 2
 
     def __init__(self, Lx, Ly, site, **kwargs):
         NN = [(0, 0, np.array([1, 0])), (0, 0, np.array([0, 1]))]
@@ -813,7 +859,7 @@ class Square(SimpleLattice):
         kwargs.setdefault('nearest_neighbors', NN)
         kwargs.setdefault('next_nearest_neighbors', nNN)
         kwargs.setdefault('next_next_nearest_neighbors', nnNN)
-        super().__init__([Lx, Ly], site, **kwargs)
+        SimpleLattice.__init__(self, [Lx, Ly], site, **kwargs)
 
 
 class Honeycomb(Lattice):
@@ -832,6 +878,7 @@ class Honeycomb(Lattice):
         Additional keyword arguments given to the :class:`Lattice`.
         `basis`, `pos` and `[[next_]next_]nearest_neighbors` are set accordingly.
     """
+    dim = 2
 
     def __init__(self, Lx, Ly, sites, **kwargs):
         sites = _parse_sites(sites, 2)
@@ -847,7 +894,7 @@ class Honeycomb(Lattice):
         kwargs.setdefault('nearest_neighbors', NN)
         kwargs.setdefault('next_nearest_neighbors', nNN)
         kwargs.setdefault('next_next_nearest_neighbors', nnNN)
-        super().__init__([Lx, Ly], sites, **kwargs)
+        Lattice.__init__(self, [Lx, Ly], sites, **kwargs)
 
     def ordering(self, order):
         """Provide possible orderings of the `N` lattice sites.
@@ -890,6 +937,7 @@ class Kagome(Lattice):
         Additional keyword arguments given to the :class:`Lattice`.
         `basis`, `pos` and `[[next_]next_]nearest_neighbors` are set accordingly.
     """
+    dim = 2
     def __init__(self, Lx, Ly, sites, **kwargs):
         sites = _parse_sites(sites, 3)
         #     2
@@ -924,7 +972,28 @@ class Kagome(Lattice):
         kwargs.setdefault('nearest_neighbors', NN)
         kwargs.setdefault('next_nearest_neighbors', nNN)
         kwargs.setdefault('next_next_nearest_neighbors', nnNN)
-        super().__init__([Lx, Ly], sites, **kwargs)
+        Lattice.__init__(self, [Lx, Ly], sites, **kwargs)
+
+
+def get_lattice(lattice_name):
+    """Given the name of a :class:`Lattice` class, create an instance of it with gi.
+
+    Parameters
+    ----------
+    lattice_name : str
+        Name of a :class:`Lattice` class defined in the module :mod:`~tenpy.models.lattice`,
+        for example ``"Chain", "Square", "Honeycomb", ...``.
+    *args, **kwargs
+        Arguments and keyword-arguments for the initialization of the specified lattice class.
+
+    Returns
+    -------
+    LatticeClass : (subclass of) :class:`Lattice`
+        An instance of the lattice class specified by `lattice_name`.
+    """
+    LatticeClass = globals()[lattice_name]
+    assert issubclass(LatticeClass, Lattice)
+    return LatticeClass
 
 
 def get_order(shape, snake_winding, priority=None):

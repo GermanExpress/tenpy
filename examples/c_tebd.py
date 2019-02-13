@@ -17,7 +17,8 @@ def example_TEBD_gs_finite(L, g):
     print("finite TEBD, imaginary time evolution, L={L:d}, g={g:.2f}".format(L=L, g=g))
     model_params = dict(L=L, J=1., g=g, bc_MPS='finite', conserve=None, verbose=0)
     M = TFIChain(model_params)
-    psi = MPS.from_product_state(M.lat.mps_sites(), [0] * L, bc='finite')
+    product_state = ["up"] * M.lat.N_sites
+    psi = MPS.from_product_state(M.lat.mps_sites(), product_state, bc=M.lat.bc_MPS)
     tebd_params = {
         'order': 2,
         'delta_tau_list': [0.1, 0.01, 0.001, 1.e-4, 1.e-5],
@@ -45,7 +46,8 @@ def example_TEBD_gs_infinite(g):
     print("infinite TEBD, imaginary time evolution, g={g:.2f}".format(g=g))
     model_params = dict(L=2, J=1., g=g, bc_MPS='infinite', conserve=None, verbose=0)
     M = TFIChain(model_params)
-    psi = MPS.from_product_state(M.lat.mps_sites(), [0] * 2, bc='infinite')
+    product_state = ["up"] * M.lat.N_sites
+    psi = MPS.from_product_state(M.lat.mps_sites(), product_state, bc=M.lat.bc_MPS)
     tebd_params = {
         'order': 2,
         'delta_tau_list': [0.1, 0.01, 0.001, 1.e-4, 1.e-5],
@@ -96,19 +98,19 @@ def example_TEBD_lightcone(L, g, tmax, dt):
     for n in range(int(tmax / dt_measure + 0.5)):
         eng.run()
         S.append(psi.entanglement_entropy())
-    import pylab as pl
-    pl.figure()
-    pl.imshow(
+    import matplotlib.pyplot as plt
+    plt.figure()
+    plt.imshow(
         S[::-1],
         vmin=0.,
         aspect='auto',
         interpolation='nearest',
         extent=(0, L - 1., -0.5 * dt_measure, eng.evolved_time + 0.5 * dt_measure))
-    pl.xlabel('site $i$')
-    pl.ylabel('time $t/J$')
-    pl.ylim(0., tmax)
-    pl.colorbar().set_label('entropy $S$')
-    pl.savefig('c_tebd_lightcone.pdf')
+    plt.xlabel('site $i$')
+    plt.ylabel('time $t/J$')
+    plt.ylim(0., tmax)
+    plt.colorbar().set_label('entropy $S$')
+    plt.savefig('c_tebd_lightcone.pdf')
 
 
 if __name__ == "__main__":

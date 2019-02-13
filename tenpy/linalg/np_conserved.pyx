@@ -1,6 +1,6 @@
 r"""A module to handle charge conservation in tensor networks.
 
-A detailed introduction to this module (including notations) can be found in :doc:`../intro_npc`.
+A detailed introduction to this module (including notations) can be found in :doc:`/intro_npc`.
 
 This module `np_conserved` implements an class :class:`Array`
 designed to make use of charge conservation in tensor networks.
@@ -83,7 +83,7 @@ cdef class Array(object):
 
     An `Array` represents a multi-dimensional tensor,
     together with the charge structure of its legs (for abelian charges).
-    Further information can be found in :doc:`../intro_npc`.
+    Further information can be found in :doc:`/intro_npc`.
 
     The default :meth:`__init__` (i.e. ``Array(...)``) does not insert any data,
     and thus yields an Array 'full' of zeros, equivalent to :func:`zeros()`.
@@ -514,7 +514,7 @@ cdef class Array(object):
     def iset_leg_labels(self, labels):
         """Set labels for the different axes/legs. In place.
 
-        Introduction to leg labeling can be found in :doc:`../intro_npc`.
+        Introduction to leg labeling can be found in :doc:`/intro_npc`.
 
         Parameters
         ----------
@@ -871,18 +871,17 @@ cdef class Array(object):
             extended.iset_leg_labels(labs)
         return extended
 
-    def extend(self, axis, new_ind_len, extend_charges=None):
+    def extend(self, axis, extra):
         """Increase the dimension of a given axis, filling the values with zeros.
 
         Parameters
         ----------
         axis : int | str
             The axis (or axis-label) to be extended.
-        new_ind_len : int
-            The new size of the specified leg.
-        charges_extend : charges | None
-            The charge values to be used for the new charge block.
-            `None` defaults to trivial charges (i.e. 0 values).
+        extra : :class:`LegCharge` | int
+            By what to extend, i.e. the charges to be appended to the leg of `axis`.
+            An int stands for extending the length of the array by a single new block of that size
+            with zero charges.
 
         Returns
         -------
@@ -891,7 +890,7 @@ cdef class Array(object):
         """
         extended = self.copy(deep=True)
         ax = self.get_leg_index(axis)
-        extended.legs[ax] = extended.legs[ax].extend(new_ind_len, extend_charges)
+        extended.legs[ax] = extended.legs[ax].extend(extra)
         extended._set_shape()
         return extended
 
@@ -1402,7 +1401,7 @@ cdef class Array(object):
         cdef Array cp = self.copy(deep=False)  # manual deep copy: don't copy every block twice
         cp._qdata = cp._qdata.copy()
         if dtype is None:
-            dtype = np.common_dtype(*self._data)
+            dtype = np.find_common_type([d.dtype for d in self._data], [])
         cp.dtype = np.dtype(dtype)
         cp._data = [d.astype(self.dtype, copy=True) for d in self._data]
         return cp
@@ -1822,7 +1821,8 @@ cdef class Array(object):
             self._qdata = np.array(qdata, dtype=np.intp).reshape((len(data), self.rank))
             # ``self._qdata_sorted = True`` was set by self.isort_qdata
         if len(self._data) > 0:
-            self.dtype = self._data[0].dtype
+            self.dtype = np.find_common_type([d.dtype for d in self._data], [])
+            self._data = [np.asarray(a, dtype=self.dtype) for a in self._data]
         return self
 
     def binary_blockwise(self, func, other, *args, **kwargs):
@@ -3290,9 +3290,9 @@ def svd(a,
 
     # 'split' pipes introduced to ensure complete blocking
     if 0 in piped_axes:
-        U.split_legs(0)
+        U = U.split_legs(0)
     if 1 in piped_axes:
-        VH.split_legs(1)
+        VH = VH.split_legs(1)
     U.iset_leg_labels([a_labels[0], labL])
     VH.iset_leg_labels([labR, a_labels[1]])
     return U, S, VH

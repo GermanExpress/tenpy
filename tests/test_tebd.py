@@ -7,6 +7,7 @@ import numpy as np
 from tenpy.networks.mps import MPS
 from tenpy.models.spins import SpinChain
 import tenpy.algorithms.tebd as tebd
+from tenpy.networks.site import SpinHalfSite
 from tenpy.algorithms.exact_diag import ExactDiag
 from nose.plugins.attrib import attr
 
@@ -37,9 +38,9 @@ def check_tebd(bc_MPS='finite', g=0.5):
     tebd_param = {
         'verbose': 2,
         'dt': 0.01,
-        'order': 4,
-        'delta_tau_list': [0.1, 1.e-4, 1.e-8, 1.e-10],
-        'max_error_E': 1.e-10,
+        'order': 2,
+        'delta_tau_list': [0.1, 1.e-4, 1.e-8],
+        'max_error_E': 1.e-9,
         'trunc_params': {
             'chi_max': 50,
             'trunc_cut': 1.e-13
@@ -58,10 +59,10 @@ def check_tebd(bc_MPS='finite', g=0.5):
         Etebd = np.sum(M.bond_energies(psi))
         Eexact = np.min(ED.E)
         print("E_TEBD={Etebd:.14f} vs E_exact={Eex:.14f}".format(Etebd=Etebd, Eex=Eexact))
-        assert (abs((Etebd - Eexact) / Eexact) < 1.e-8)
+        assert (abs((Etebd - Eexact) / Eexact) < 1.e-7)
         ov = npc.inner(psi_ED, ED.mps_to_full(psi), do_conj=True)
         print("compare with ED: overlap = ", abs(ov)**2)
-        assert (abs(abs(ov) - 1.) < 1.e-8)
+        assert (abs(abs(ov) - 1.) < 1.e-7)
 
         # Test real time TEBD: should change on an eigenstate
         Sold = np.average(psi.entanglement_entropy())
@@ -70,7 +71,7 @@ def check_tebd(bc_MPS='finite', g=0.5):
         Enew = np.sum(M.bond_energies(psi))
         Snew = np.average(psi.entanglement_entropy())
         assert (abs(Enew - Etebd) < 1.e-8)
-        assert (abs(Sold - Snew) < 1.e-6)  # somehow we need larger tolerance here....
+        assert (abs(Sold - Snew) < 1.e-5)  # somehow we need larger tolerance here....
 
     if bc_MPS == 'infinite':
         Etebd = np.average(M.bond_energies(psi))
@@ -82,8 +83,8 @@ def check_tebd(bc_MPS='finite', g=0.5):
             engine.run()
         Enew = np.average(M.bond_energies(psi))
         Snew = np.average(psi.entanglement_entropy())
-        assert (abs(Etebd - Enew) < 1.e-10)
-        assert (abs(Sold - Snew) < 1.e-6)  # somehow we need larger tolerance here....
+        assert (abs(Etebd - Enew) < 1.e-7)
+        assert (abs(Sold - Snew) < 1.e-5)  # somehow we need larger tolerance here....
 
 
 @attr('slow')
@@ -92,7 +93,33 @@ def test_tebd():
         yield check_tebd, bc_MPS
 
 
+def test_RandomUnitaryEvolution():
+    L = 8
+    spin_half = SpinHalfSite(conserve='Sz')
+    psi = MPS.from_product_state([spin_half]*L, [0, 1]*(L//2), bc='finite')  # Neel state
+    assert tuple(psi.chi) == (1, 1, 1, 1, 1, 1, 1)
+    TEBD_params = dict(N_steps=2, trunc_params={'chi_max':10})
+    eng = tebd.RandomUnitaryEvolution(psi, TEBD_params)
+    eng.run()
+    print(eng.psi.chi)
+    assert tuple(eng.psi.chi) == (2, 4, 8, 10, 8, 4, 2)
+
+    # infinite versions
+    TEBD_params['trunc_params']['chi_max'] = 20
+    psi = MPS.from_product_state([spin_half]*2, [0, 0], bc='infinite')
+    eng = tebd.RandomUnitaryEvolution(psi, TEBD_params)
+    eng.run()
+    print(eng.psi.chi)
+    assert tuple(eng.psi.chi) == (1, 1)  # all up can not be changed
+    eng.psi = MPS.from_product_state([spin_half]*2, [0, 1], bc='infinite')
+    eng.run()
+    print(eng.psi.chi)
+    assert tuple(eng.psi.chi) == (16, 8)
+
+
+
 if __name__ == "__main__":
+    test_RandomUnitaryEvolution()
     for f_args in test_tebd():
         f = f_args[0]
         print("=" * 80)

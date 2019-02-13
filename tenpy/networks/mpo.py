@@ -34,13 +34,12 @@ We store these indices in `IdL` and `IdR` (if there are such indices).
 Similar as for the MPS, a bond index ``i`` is *left* of site `i`,
 i.e. between sites ``i-1`` and ``i``.
 
-.. todo ::
-    transfermatrix for MPO
 """
 # Copyright 2018 TeNPy Developers
 
 import numpy as np
 from ..linalg import np_conserved as npc
+from .site import group_sites
 from ..tools.string import vert_join
 from .mps import MPS as _MPS  # only for MPS._valid_bc
 from .mps import MPSEnvironment
@@ -48,7 +47,7 @@ from .mps import MPSEnvironment
 __all__ = ['MPO', 'MPOGraph', 'MPOEnvironment', 'grid_insert_ops']
 
 
-class MPO(object):
+class MPO:
     """Matrix product operator, finite (MPO) or infinite (iMPO).
 
     Parameters
@@ -85,6 +84,8 @@ class MPO(object):
     IdR : list of {int | None}
         Indices on the bonds, which correpond to 'only identities to the right'.
         ``None`` for bonds where it is not set.
+    grouped : int
+        Number of sites grouped together, see :meth:`group_sites`.
     _W : list of :class:`~tenpy.linalg.np_conserved.Array`
         The matrices of the MPO. Labels are ``'wL', 'wR', 'p', 'p*'``.
     _valid_bc : tuple of str
@@ -100,6 +101,7 @@ class MPO(object):
         self._W = [W.astype(dtype, copy=True) for W in Ws]
         self.IdL = self._get_Id(IdL, len(sites))
         self.IdR = self._get_Id(IdR, len(sites))
+        self.grouped = 1
         self.bc = bc
         self.test_sanity()
 
@@ -124,8 +126,8 @@ class MPO(object):
 
         See also
         --------
-        :meth:`grid_insert_ops` : used to convert `entries` of the grid into operators
-        :meth:`~tenpy.linalg.np_conserved.grid_outer` : converts a grid into an Array
+        :func:`grid_insert_ops` : used to plug in `entries` of the grid
+        grid_outer : Used :func:`~tenpy.linalg.np_conserved.grid_outer` for final conversion.
         """
         chinfo = sites[0].leg.chinfo
         L = len(sites)
@@ -177,11 +179,9 @@ class MPO(object):
             if self.bc == 'infinite' or i + 1 < self.L:
                 W2 = self.get_W(i + 1)
                 W.get_leg('wR').test_contractible(W2.get_leg('wL'))
-        if self.bc == 'finite':
-            assert (self._W[0].get_leg('wL').ind_len == 1)
-            assert (self._W[-1].get_leg('wR').ind_len == 1)
         if not (len(self.IdL) == len(self.IdR) == self.L + 1):
             raise ValueError("wrong len of `IdL`/`IdR`")
+
     @property
     def L(self):
         """Number of physical sites. For an iMPO the len of the MPO unit cell."""
@@ -229,6 +229,46 @@ class MPO(object):
         i = self._to_valid_index(i)
         return self.IdR[i + 1]
 
+    def group_sites(self, n=2, grouped_sites=None):
+        """Modify `self` inplace to group sites.
+
+        Group each `n` sites together using the :class:`~tenpy.networks.site.GroupedSite`.
+        This might allow to do TEBD with a Trotter decomposition,
+        or help the convergence of DMRG (in case of too long range interactions).
+
+        Parameters
+        ----------
+        n : int
+            Number of sites to be grouped together.
+        grouped_sites : None | list of :class:`~tenpy.networks.site.GroupedSite`
+            The sites grouped together.
+        """
+        if grouped_sites is None:
+            grouped_sites = group_sites(self.sites, n, charges='same')
+        else:
+            assert grouped_sites[0].n_sites == n
+        Ws = []
+        IdL = []
+        IdR = [self.IdR[0]]
+        i = 0
+        for gs in grouped_sites:
+            new_W = self.get_W(i).itranspose(['wL', 'p', 'p*', 'wR'])
+            for j in range(1, gs.n_sites):
+                W = self.get_W(i+j).itranspose(['wL', 'p', 'p*', 'wR'])
+                new_W = npc.tensordot(new_W, W, axes=[-1, 0])
+            comb = [list(range(1, 1+2*gs.n_sites, 2)), list(range(2, 2+2*gs.n_sites, 2))]
+            new_W = new_W.combine_legs(comb, pipes=[gs.leg, gs.leg.conj()])
+            Ws.append(new_W.iset_leg_labels(['wL', 'p', 'p*', 'wR']))
+            IdL.append(self.get_IdL(i))
+            i += gs.n_sites
+            IdR.append(self.get_IdR(i-1))
+        IdL.append(self.IdL[-1])
+        self.IdL = IdL
+        self.IdR = IdR
+        self._W = Ws
+        self.sites = grouped_sites
+        self.grouped = self.grouped * n
+
     def _to_valid_index(self, i):
         """Make sure `i` is a valid index (depending on `self.bc`)."""
         if not self.finite:
@@ -251,7 +291,7 @@ class MPO(object):
                 return [Id] * (L + 1)
 
 
-class MPOGraph(object):
+class MPOGraph:
     """Representation of an MPO by a graph, based on a 'finite state machine'.
 
     This representation is used for building H_MPO from the interactions.
@@ -642,10 +682,10 @@ class MPOEnvironment(MPSEnvironment):
         -------
         LP_i : :class:`~tenpy.linalg.np_conserved.Array`
             Contraction of everything left of site `i`,
-            with labels ``'vR*', 'vR'`` for `bra`, `ket`.
+            with labels ``'vR*', 'wR', 'vR'`` for `bra`, `H`, `ket`.
         """
         # actually same as MPSEnvironment, just updated the labels in the doc string.
-        return super(MPOEnvironment, self).get_LP(i, store=True)
+        return super().get_LP(i, store)
 
     def get_RP(self, i, store=True):
         """Calculate RP at given site from nearest available one (including `i`).
@@ -660,11 +700,11 @@ class MPOEnvironment(MPSEnvironment):
         Returns
         -------
         RP_i : :class:`~tenpy.linalg.np_conserved.Array`
-            Contraction of everything left of site `i`,
+            Contraction of everything right of site `i`,
             with labels ``'vL*', 'wL', 'vL'`` for `bra`, `H`, `ket`.
         """
         # actually same as MPSEnvironment, just updated the labels in the doc string.
-        return super(MPOEnvironment, self).get_RP(i, store=True)
+        return super().get_RP(i, store)
 
     def full_contraction(self, i0):
         """Calculate the energy by a full contraction of the network.
